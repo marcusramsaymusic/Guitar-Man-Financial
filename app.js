@@ -47,7 +47,7 @@ function lineType(it){if(it.type&&LTYPES.some(x=>x[0]===it.type))return it.type;
 function guessType(desc){return pdRe.test(desc)?"perdiem":reimbRe.test(desc)?"reimb":"pay"}
 
 /* ———————————— state ———————————— */
-const DEFAULT_SETTINGS={businessName:"",tagline:"",address:"",phone:"",email:"",gstNumber:"",taxLabel:"GST/HST",defaultTaxType:"GST",defaultTaxRate:5,defaultCurrency:"CAD",gmailSyncedThrough:"",homePct:"",rentMonthly:"",utilMonthly:"",incomeGoal:"",vehPctManual:"",odo:{}};
+const DEFAULT_SETTINGS={businessName:"",tagline:"",address:"",phone:"",email:"",gstNumber:"",taxLabel:"GST/HST",defaultTaxType:"GST",defaultTaxRate:5,defaultCurrency:"CAD",homeProv:"",gmailSyncedThrough:"",homePct:"",rentMonthly:"",utilMonthly:"",incomeGoal:"",vehPctManual:"",odo:{}};
 const S={
   booted:false, persist:false, col:null,
   sample:null, canImages:false, mcp:null, downloads:null,
@@ -176,19 +176,37 @@ async function prepFile(file){
 /* ———————————— Claude prompts ———————————— */
 const RECEIPT_PROMPT=`The image is a photo of a purchase receipt for a self-employed Canadian musician (session guitarist and producer) who tracks business write-offs and GST/HST input tax credits.
 Reply with only one JSON object:
-{"vendor": string, "date": "YYYY-MM-DD" or null, "currency": 3-letter code (CAD unless the receipt clearly shows another currency or a non-Canadian address), "total": number (grand total paid), "tax": number (GST or HST shown; for a non-Canadian receipt, any VAT/sales tax shown; 0 if none; never include BC PST), "category": one of ${JSON.stringify(CATS)}, "note": short description of what was bought}`;
+{"vendor": string, "date": "YYYY-MM-DD" or null, "currency": 3-letter code (CAD unless the receipt clearly shows another currency or a non-Canadian address), "total": number (grand total paid), "tax": number or null (the GST or HST amount printed on the receipt; 0 only if it prints GST/HST as $0; null if the receipt doesn't list GST/HST separately; for a non-Canadian receipt, any VAT/sales tax shown; never include PST, QST or RST), "province": two-letter Canadian province or territory code where it was bought (from the store address or phone number), or null, "category": one of ${JSON.stringify(CATS)}, "note": short description of what was bought}`;
 const INVOICE_PROMPT=`The image is an invoice that a Canadian musician previously issued to a client. Reply with only one JSON object:
 {"number": string or null, "client": string, "clientAddress": string (newline-separated) or "", "clientEmail": string or null, "forLabel": string or "", "date": "YYYY-MM-DD" or null, "currency": 3-letter code, "items": [{"desc": string, "amount": number, "type": "pay" (fees, show/session/travel-day/rehearsal rates, production) or "perdiem" or "reimb" (expenses billed back: flights, bag fees, parking, rides, ferries, gas, gear bought for the client)}], "tax": number (GST/HST amount as printed, 0 if none), "total": number}`;
 function emailBatchPrompt(batch){
   return `Each block below is one email from a self-employed Canadian musician's inbox (based in Canada). Decide whether each is a receipt for money he actually paid (purchases, subscriptions, flights, parking, rides, meals, bookings that were charged). Shipping updates, reminders, marketing, refunds, $0 changes, quotes, and bookings paid by someone else are NOT receipts.
 Reply with only a JSON array, one object per email, in the same order:
-{"id": the email id given, "isReceipt": boolean, "vendor": string, "date": "YYYY-MM-DD", "currency": 3-letter code of the amount charged (CAD if it says it was charged in CAD), "total": number (grand total charged), "tax": number (GST or HST only, as printed; 0 if not shown or foreign), "category": one of ${JSON.stringify(CATS)} (gym day passes and gym memberships go in "Fitness on the road"; use "${PERSONAL}" for clearly personal things like streaming, household, gifts, vacations), "note": short description}
+{"id": the email id given, "isReceipt": boolean, "vendor": string, "date": "YYYY-MM-DD", "currency": 3-letter code of the amount charged (CAD if it says it was charged in CAD), "total": number (grand total charged), "tax": number or null (GST or HST only, as printed; null if the email doesn't list GST/HST separately; 0 if foreign or printed as $0), "province": two-letter Canadian province or territory code where it was bought or the service was delivered, or null, "category": one of ${JSON.stringify(CATS)} (gym day passes and gym memberships go in "Fitness on the road"; use "${PERSONAL}" for clearly personal things like streaming, household, gifts, vacations), "note": short description}
 
 ${batch.map(b=>`=== EMAIL id=${b.id} | from: ${b.from} | subject: ${b.subject} | date: ${b.date}\n${b.text}`).join("\n\n")}`;
 }
 
+/* ———————————— sales tax by province: estimate the GST/HST inside a total when the receipt doesn't itemize it ———————————— */
+const PROV=[["AB","Alberta",5,0,0],["BC","British Columbia",5,0,7],["MB","Manitoba",5,0,7],["NB","New Brunswick",0,15,0],["NL","Newfoundland and Labrador",0,15,0],["NS","Nova Scotia",0,14,0],["NT","Northwest Territories",5,0,0],["NU","Nunavut",5,0,0],["ON","Ontario",0,13,0],["PE","Prince Edward Island",0,15,0],["QC","Quebec",5,0,9.975],["SK","Saskatchewan",5,0,6],["YT","Yukon",5,0,0]];
+const provOf=c=>PROV.find(p=>p[0]===c);
+const provOpts=(sel,blank)=>`${blank?`<option value="">${blank}</option>`:""}${PROV.map(p=>`<option value="${p[0]}" ${p[0]===sel?"selected":""}>${p[1]}</option>`).join("")}`;
+function taxSplit(total,prov,cat){const p=provOf(prov);if(!p)return null;let [code,name,g,h,ps]=p;const t=num(total);
+  const otherLabel=code==="QC"?"QST":code==="MB"?"RST":"PST";
+  if(cat==="Insurance")return{claim:0,other:0,name,label:"GST/HST",otherLabel,exempt:true};
+  if(code==="BC"&&cat==="Meals & entertainment")ps=0;
+  const rate=g+h+ps;const r2=x=>Math.round(x*100)/100;
+  return{claim:t>0?r2(t*(g+h)/(100+rate)):0,other:t>0?r2(t*ps/(100+rate)):0,name,label:h?`HST ${h}%`:`GST ${g}%`,otherLabel:ps?`${otherLabel} ${ps}%`:"",exempt:false}}
+function taxEstLine(d){if(d.currency!=="CAD"||isPersonal(d))return "";if(String(d.taxPaid??"").trim()!=="")return `<span class="note">Using the tax shown on the receipt. Clear the box to estimate it from the province instead.</span>`;
+  if(!provOf(d.prov))return `<span class="note">No tax on the receipt? Pick the province it was bought in and the GST/HST is worked out for you.</span>`;
+  const e=taxSplit(d.total,d.prov,d.category);if(!num(d.total))return `<span class="note">Enter the total and the ${esc(e.label)} inside it is worked out for you.</span>`;
+  if(e.exempt)return `<span class="note">Insurance has no GST/HST to claim.</span>`;
+  return `<span class="ok">Estimated: ${money(e.claim)} ${esc(e.label)} you can claim</span>${e.other?`<span class="note"> + ${money(e.other)} ${esc(e.otherLabel)} (not claimable, it stays part of the cost)</span>`:""}`}
+function withTaxEst(rec,x){if(rec.currency!=="CAD")return rec;const pr=provOf(x&&x.province)?x.province:(S.settings.homeProv||"");if(pr)rec.prov=pr;
+  if(x&&(x.tax===null||x.tax===undefined||x.tax==="")){const e=taxSplit(rec.total,pr,rec.category);if(e){rec.taxPaid=e.claim;rec.pstPaid=e.other;rec.taxEstimated=true}}else rec.taxEstimated=false;return rec}
+
 /* ———————————— receipts flow ———————————— */
-function blankDraft(extra){return{id:newId(),vendor:"",date:today(),currency:"CAD",total:"",taxPaid:"",category:"Other",note:"",preview:null,blob:null,status:"manual",err:"",touched:{},...extra}}
+function blankDraft(extra){return{id:newId(),prov:S.settings.homeProv||"",vendor:"",date:today(),currency:"CAD",total:"",taxPaid:"",category:"Other",note:"",preview:null,blob:null,status:"manual",err:"",touched:{},...extra}}
 async function onReceiptFile(file){
   if(!file)return;
   S.tab="receipts";S.imgView=null;if(S.ctl)S.ctl.abort();
@@ -208,7 +226,7 @@ async function readDraft(){
     const put=(k,v)=>{if(!d.touched[k]&&v!==undefined&&v!==null&&v!=="")d[k]=v};
     put("vendor",x.vendor);put("date",/^\d{4}-\d{2}-\d{2}$/.test(x.date||"")?x.date:null);
     put("currency",CURS.includes(x.currency)?x.currency:null);
-    put("total",x.total!=null?String(num(x.total)):null);put("taxPaid",x.tax!=null?String(num(x.tax)):null);
+    put("total",x.total!=null?String(num(x.total)):null);if(!d.touched.taxPaid)d.taxPaid=x.tax===null||x.tax===undefined||x.tax===""?"":String(num(x.tax));if(provOf(x.province))put("prov",x.province);
     put("category",CATS.includes(x.category)?x.category:null);put("note",x.note);
     d.status="read";
   }catch(e){if(S.recDraft!==d)return;d.status="error";d.err=sampleErr(e&&e.code)}
@@ -217,8 +235,9 @@ async function readDraft(){
 async function fileDraft(){
   const d=S.recDraft;if(!d)return;
   const prev=d.editOf?S.receipts.find(r=>r.id===d.editOf):null;
-  const rec={...(prev||{}),kind:"receipt",id:prev?prev.id:"rec_"+d.id,stream:d.stream||"",vendor:(d.vendor||"").trim()||"Unnamed vendor",date:d.date||today(),currency:d.currency,total:num(d.total),taxPaid:num(d.taxPaid),category:d.category,note:(d.note||"").trim(),needsReview:false,
+  const rec={...(prev||{}),kind:"receipt",id:prev?prev.id:"rec_"+d.id,stream:d.stream||"",vendor:(d.vendor||"").trim()||"Unnamed vendor",date:d.date||today(),currency:d.currency,total:num(d.total),taxPaid:num(d.taxPaid),taxEstimated:false,pstPaid:0,prov:d.prov||"",category:d.category,note:(d.note||"").trim(),needsReview:false,
     hasImage:prev?!!prev.hasImage||!!d.preview:!!d.preview,backup:prev?(prev.backup==="done"&&(prev.category!==d.category||prev.date!==d.date)?"moved":prev.backup):(S.mcp?"pending":"off"),createdAt:prev?.createdAt||Date.now()};
+  if(rec.currency==="CAD"&&String(d.taxPaid??"").trim()===""&&!isPersonal(rec)){const e=taxSplit(rec.total,d.prov,rec.category);if(e){rec.taxPaid=e.claim;rec.pstPaid=e.other;rec.taxEstimated=true}}
   const img=d.preview;if(S.ctl)S.ctl.abort();
   S.recDraft=null;if(img)S.imgCache[rec.id]=img;
   await save(rec);
@@ -266,7 +285,7 @@ async function syncGmail(auto){
         const x=(Array.isArray(out)?out:[]).find(o=>String(o.id)===m.id);
         if(x&&x.isReceipt&&num(x.total)>0){
           const cur=CURS.includes(x.currency)?x.currency:"CAD";
-          await save({kind:"receipt",id:"rec_g"+m.id,gid:m.id,source:"gmail",url:m.url,needsReview:true,vendor:cleanText(x.vendor||m.from).slice(0,80),date:/^\d{4}-\d{2}-\d{2}$/.test(x.date||"")?x.date:m.date,currency:cur,total:num(x.total),taxPaid:cur==="CAD"?num(x.tax):0,category:CATS.includes(x.category)?x.category:"Other",note:cleanText(x.note||m.subject).slice(0,140),hasImage:false,backup:"off",createdAt:Date.now()},true);
+          await save(withTaxEst({kind:"receipt",id:"rec_g"+m.id,gid:m.id,source:"gmail",url:m.url,needsReview:true,vendor:cleanText(x.vendor||m.from).slice(0,80),date:/^\d{4}-\d{2}-\d{2}$/.test(x.date||"")?x.date:m.date,currency:cur,total:num(x.total),taxPaid:cur==="CAD"?num(x.tax):0,category:CATS.includes(x.category)?x.category:"Other",note:cleanText(x.note||m.subject).slice(0,140),hasImage:false,backup:"off",createdAt:Date.now()},x),true);
           S.sync.added++;
         }else S.sync.skipped++;
         S.sync.done++;
@@ -1308,7 +1327,7 @@ async function importGmailReceipt(m){
   if(!S.sample)throw{code:"not_granted"};
   const out=await S.sample.json(emailBatchPrompt([{id:m.id,from:m.from,subject:m.subject,date:m.date,text:text.slice(0,5000)}]));
   const x=(Array.isArray(out)?out[0]:out)||{};const cur=CURS.includes(x.currency)?x.currency:"CAD";
-  const rec={kind:"receipt",id:"rec_g"+m.id,gid:m.id,source:"gmail",url:r.viewUrl||m.url,vendor:cleanText(x.vendor||m.from).slice(0,80),date:/^\d{4}-\d{2}-\d{2}$/.test(x.date||"")?x.date:m.date,currency:cur,total:num(x.total),taxPaid:cur==="CAD"?num(x.tax):0,category:CATS.includes(x.category)&&x.category!==PERSONAL?x.category:"Travel & accommodation",note:cleanText(x.note||m.subject).slice(0,140),emailText:text.slice(0,6000),needsReview:!num(x.total),hasImage:false,backup:S.mcp?"pending":"off",createdAt:Date.now()};
+  const rec={kind:"receipt",id:"rec_g"+m.id,gid:m.id,source:"gmail",url:r.viewUrl||m.url,vendor:cleanText(x.vendor||m.from).slice(0,80),date:/^\d{4}-\d{2}-\d{2}$/.test(x.date||"")?x.date:m.date,currency:cur,total:num(x.total),taxPaid:cur==="CAD"?num(x.tax):0,category:CATS.includes(x.category)&&x.category!==PERSONAL?x.category:"Travel & accommodation",note:cleanText(x.note||m.subject).slice(0,140),emailText:text.slice(0,6000),needsReview:!num(x.total),hasImage:false,backup:S.mcp?"pending":"off",createdAt:Date.now()};withTaxEst(rec,x);
   await save(rec,true);backupReceipt(rec.id);return{rec,existed:false,notReceipt:x.isReceipt===false};
 }
 async function gfindPick(i){
@@ -1360,7 +1379,7 @@ async function onInvReceiptFile(file){
   if(S.sample&&S.canImages){S.invRc={status:"reading"};render(true);try{x=await S.sample.json(RECEIPT_PROMPT,{images:[p.blob]})||{}}catch(e){readErr=sampleErr(e&&e.code)}}
   if(!S.invEdit)return;
   const cur=CURS.includes(x.currency)?x.currency:"CAD";
-  const rec={kind:"receipt",id:"rec_"+newId(),vendor:cleanText(x.vendor||"Receipt").slice(0,80),date:/^\d{4}-\d{2}-\d{2}$/.test(x.date||"")?x.date:today(),currency:cur,total:num(x.total),taxPaid:cur==="CAD"?num(x.tax):0,category:CATS.includes(x.category)&&x.category!==PERSONAL?x.category:"Travel & accommodation",note:cleanText(x.note||"").slice(0,140),needsReview:!num(x.total),hasImage:!!p.preview,backup:S.mcp?"pending":"off",source:"invoice",createdAt:Date.now()};
+  const rec={kind:"receipt",id:"rec_"+newId(),vendor:cleanText(x.vendor||"Receipt").slice(0,80),date:/^\d{4}-\d{2}-\d{2}$/.test(x.date||"")?x.date:today(),currency:cur,total:num(x.total),taxPaid:cur==="CAD"?num(x.tax):0,category:CATS.includes(x.category)&&x.category!==PERSONAL?x.category:"Travel & accommodation",note:cleanText(x.note||"").slice(0,140),needsReview:!num(x.total),hasImage:!!p.preview,backup:S.mcp?"pending":"off",source:"invoice",createdAt:Date.now()};withTaxEst(rec,x);
   if(p.preview)S.imgCache[rec.id]=p.preview;
   await save(rec,true);
   if(p.preview&&S.col){try{await S.col.doc("img_"+rec.id).set({kind:"image",data:p.preview})}catch{}}
@@ -1861,7 +1880,9 @@ ${d.status==="read"?`<div class="ok">Read it. Check the numbers, then file it.</
 <div class="field"><label class="label" for="rd-date">Date</label><input id="rd-date" type="date" data-bind="recDraft.date" value="${esc(d.date)}" ${reading?"disabled":""}></div>
 <div class="field"><label class="label" for="rd-cur">Currency</label><select id="rd-cur" data-bind="recDraft.currency" data-rerender="1" ${reading?"disabled":""}>${CURS.map(c=>`<option ${c===d.currency?"selected":""}>${c}</option>`).join("")}</select></div>
 <div class="field"><label class="label" for="rd-total">Total paid (with tax)</label><input id="rd-total" class="mono" inputmode="decimal" data-bind="recDraft.total" value="${esc(d.total)}" ${reading?"disabled":""}></div>
-<div class="field"><label class="label" for="rd-tax">${d.currency==="CAD"?"GST/HST on receipt":"Foreign tax (not claimable)"}</label><input id="rd-tax" class="mono" inputmode="decimal" data-bind="recDraft.taxPaid" value="${esc(d.taxPaid)}" ${reading?"disabled":""}></div>
+<div class="field"><label class="label" for="rd-tax">${d.currency==="CAD"?"GST/HST on receipt":"Foreign tax (not claimable)"}</label><input id="rd-tax" class="mono" inputmode="decimal" data-bind="recDraft.taxPaid" value="${esc(d.taxPaid)}" placeholder="${d.currency==="CAD"?"Not shown? Leave blank":""}" ${reading?"disabled":""}></div>
+${d.currency==="CAD"?`<div class="field"><label class="label" for="rd-prov">Bought in</label><select id="rd-prov" data-bind="recDraft.prov" data-rerender="1" ${reading?"disabled":""}>${provOpts(d.prov,"Pick a province")}</select></div>
+<div class="field" style="grid-column:1/-1;margin-top:-4px"><div id="rd-taxest" style="font-size:13.5px;line-height:1.45">${taxEstLine(d)}</div></div>`:""}
 ${(S.settings.streams||[]).some(x=>x.type==="business")?`<div class="field"><label class="label" for="rd-stream">Which business?</label><select id="rd-stream" data-bind="recDraft.stream"><option value="">${esc(S.settings.tagline||"Music")} (main)</option>${(S.settings.streams||[]).filter(x=>x.type==="business").map(x=>`<option value="${x.id}" ${d.stream===x.id?"selected":""}>${esc(x.name)}</option>`).join("")}</select></div>`:""}
 <div class="field"><label class="label" for="rd-cat">Category</label><select id="rd-cat" data-bind="recDraft.category" data-rerender="1" ${reading?"disabled":""}>${CATS.map(c=>`<option ${c===d.category?"selected":""}>${esc(c)}</option>`).join("")}</select></div>
 <div class="field" style="grid-column:1/-1"><label class="label" for="rd-note">Note</label><input id="rd-note" data-bind="recDraft.note" value="${esc(d.note)}" placeholder="What it was for" ${reading?"disabled":""}></div></div>
@@ -1905,7 +1926,8 @@ function vSettings(){
 <div class="field"><label class="label" for="st-gst">GST/HST number</label><input id="st-gst" class="mono" data-bind="sf.gstNumber" value="${esc(s.gstNumber)}"></div></div>
 <div class="grid3"><div class="field"><label class="label" for="st-tl">Tax line label</label><input id="st-tl" data-bind="sf.taxLabel" value="${esc(s.taxLabel)}"></div>
 <div class="field"><label class="label" for="sf-tax">Default tax</label>${taxSelect("sf",{taxType:s.defaultTaxType,taxRate:s.defaultTaxRate},false)}</div>
-<div class="field"><label class="label" for="st-cur">Default currency</label><select id="st-cur" data-bind="sf.defaultCurrency">${CURS.map(c=>`<option ${c===s.defaultCurrency?"selected":""}>${c}</option>`).join("")}</select></div></div>
+<div class="field"><label class="label" for="st-cur">Default currency</label><select id="st-cur" data-bind="sf.defaultCurrency">${CURS.map(c=>`<option ${c===s.defaultCurrency?"selected":""}>${c}</option>`).join("")}</select></div>
+<div class="field"><label class="label" for="st-prov">Your home province</label><select id="st-prov" data-bind="sf.homeProv">${provOpts(s.homeProv,"Pick one")}</select><span class="note" style="font-size:12.5px">Used to work out GST/HST on receipts that don't list it. Change it per receipt when you buy elsewhere.</span></div></div>
 <div class="row"><button class="btn gold" data-act="saveSettings">Save</button>${S.sfDirty?`<button class="btn ghost" data-act="resetSettings">Undo changes</button>`:""}</div></div></section>
 <section class="panel" style="max-width:640px"><span class="plaque" style="cursor:default">Home studio &amp; goals</span>
 <div class="grid3" style="margin-top:14px">
@@ -1994,7 +2016,7 @@ document.addEventListener("input",e=>{
   setPath(p,el.value);
   if(p.startsWith("sf."))S.sfDirty=true;
   if(p.startsWith("tripForm."))S.tripDirty=true;
-  if(p.startsWith("recDraft.")&&S.recDraft)S.recDraft.touched[p.split(".")[1]]=true;
+  if(p.startsWith("recDraft.")&&S.recDraft){S.recDraft.touched[p.split(".")[1]]=true;const te=$("#rd-taxest");if(te)te.innerHTML=taxEstLine(S.recDraft)}
   if(/^ie-d\d+$/.test(el.id))onLineDesc(Number(el.id.slice(4)));
   if(/^ie-r\d+$/.test(el.id)&&S.invEdit){const it=S.invEdit.items[Number(el.id.slice(4))];if(it){it.autoAmt=false;const h=document.getElementById("ie-h"+el.id.slice(4));if(h)h.innerHTML=lineHint(it)}}
   if(p.startsWith("invEdit."))refreshTotals();
@@ -2094,7 +2116,7 @@ document.addEventListener("click",async e=>{
     case "pdfInv":{const inv=S.invoices.find(i=>i.id===v);if(inv)downloadInvoicePdf(inv);break}
     case "mail":{const inv=S.invoices.find(i=>i.id===v);if(inv){const to=(inv._to??inv.clientEmail);emailInvoice({...inv,clientEmail:to})}break}
     case "manualRec":if(S.ctl)S.ctl.abort();S.recDraft=blankDraft();render(true);break;
-    case "editRec":{const r=S.receipts.find(x=>x.id===v);if(!r)break;S.tab="receipts";if(S.ctl)S.ctl.abort();S.recDraft=blankDraft({id:r.id,editOf:r.id,vendor:r.vendor,date:r.date,currency:r.currency||"CAD",total:String(r.total),taxPaid:String(r.taxPaid),category:r.category,note:r.note||"",stream:r.stream||""});render(true);window.scrollTo({top:0});break}
+    case "editRec":{const r=S.receipts.find(x=>x.id===v);if(!r)break;S.tab="receipts";if(S.ctl)S.ctl.abort();S.recDraft=blankDraft({id:r.id,editOf:r.id,vendor:r.vendor,date:r.date,currency:r.currency||"CAD",total:String(r.total),taxPaid:r.taxEstimated?"":String(r.taxPaid),prov:r.prov||S.settings.homeProv||"",category:r.category,note:r.note||"",stream:r.stream||""});render(true);window.scrollTo({top:0});break}
     case "fileRec":fileDraft();break;
     case "readAgain":readDraft();break;
     case "stopRead":if(S.ctl)S.ctl.abort();break;
