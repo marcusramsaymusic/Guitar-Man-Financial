@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src 'self'">
+<title>Privacy · Guitar Man Finance</title>
+<style>
+:root{--bg:#f6f5f2;--text:#1b1b1f;--dim:#5c5c66;--line:#dcdad4;--accent:#9a6a12}
+@media (prefers-color-scheme:dark){:root{--bg:#0d0e12;--text:#ecebe6;--dim:#a4a3ad;--line:#2a2e39;--accent:#e2b257}}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif}
+main{max-width:680px;margin:0 auto;padding:32px 16px 60px}
+h1{font-size:28px;line-height:1.2;margin:0 0 4px}h2{font-size:18px;margin:28px 0 6px;color:var(--accent)}
+p,li{color:var(--text)}.dim{color:var(--dim)}ul{padding-left:20px}
+header{display:flex;gap:14px;align-items:center;border-bottom:1px solid var(--line);padding-bottom:16px;margin-bottom:8px}
+header img{width:56px;height:56px;border-radius:13px}
+</style></head><body><main>
+<header><img src="icons/icon-192.png" alt=""><div><h1>Privacy</h1><div class="dim">Guitar Man Finance · updated October 2026</div></div></header>
+<p><b>The short version:</b> your books stay on your device. The app has no accounts, no servers, no analytics and no tracking. The only places it can send anything are your own Google Drive or Dropbox, and only if you connect them.</p>
+<h2>What the app stores, and where</h2>
+<p>Invoices, receipts and receipt photos, mileage, income, settings and your invoice design are saved in the app's own storage on your phone or computer. They aren't sent to the developer, the website host, or anyone else.</p>
+<h2>Optional cloud backup</h2>
+<ul>
+<li>If you choose <b>Connect Google Drive</b> or <b>Connect Dropbox</b>, you sign in to your own account and the app saves one backup file there.</li>
+<li>Google Drive access uses the <code>drive.file</code> permission, which only lets the app see files it created itself. Dropbox access is limited to the app's own folder (Dropbox › Apps).</li>
+<li>With <b>Lock with a passphrase</b> on, the backup is encrypted on your device (AES-256) before upload, so your cloud provider only stores unreadable data. Your passphrase is never stored or sent.</li>
+<li>You can disconnect at any time in Settings › Privacy.</li>
+</ul>
+<h2>What the app connects to</h2>
+<p>A built-in browser security rule blocks every connection except Google sign-in, the Google Drive API and the Dropbox API, and those are only used after you turn backup on. The app loads no ads, trackers, outside fonts or third-party scripts.</p>
+<h2>Camera and photos</h2>
+<p>When you photograph a receipt, the picture is saved with that receipt on your device and in your own backup if you use one. It isn't uploaded anywhere else.</p>
+<h2>Deleting your data</h2>
+<p>Settings › Privacy › Advanced: erase everything deletes all of your books from the device after two confirmation steps. You can choose to delete your cloud backup at the same time. Uninstalling the app or clearing your browser's site data also removes it.</p>
+<h2>Children</h2>
+<p>The app is meant for adults running their own business and doesn't knowingly collect anything from children.</p>
+<h2>Contact</h2>
+<p>Questions about this policy: <a href="mailto:you@example.com">you@example.com</a></p>
+</main></body></html>
