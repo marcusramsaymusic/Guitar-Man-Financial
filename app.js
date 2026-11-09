@@ -237,6 +237,7 @@ async function fileDraft(){
   const prev=d.editOf?S.receipts.find(r=>r.id===d.editOf):null;
   const rec={...(prev||{}),kind:"receipt",id:prev?prev.id:"rec_"+d.id,stream:d.stream||"",vendor:(d.vendor||"").trim()||"Unnamed vendor",date:d.date||today(),currency:d.currency,total:num(d.total),taxPaid:num(d.taxPaid),taxEstimated:false,pstPaid:0,prov:d.prov||"",category:d.category,note:(d.note||"").trim(),needsReview:false,
     hasImage:prev?!!prev.hasImage||!!d.preview:!!d.preview,backup:prev?(prev.backup==="done"&&(prev.category!==d.category||prev.date!==d.date)?"moved":prev.backup):(S.mcp?"pending":"off"),createdAt:prev?.createdAt||Date.now()};
+  rec.billLater=d.billLater&&!isPersonal(rec)&&!rec.billedTo?((d.billTo||"").trim()||"No client yet"):"";
   if(rec.currency==="CAD"&&String(d.taxPaid??"").trim()===""&&!isPersonal(rec)){const e=taxSplit(rec.total,d.prov,rec.category);if(e){rec.taxPaid=e.claim;rec.pstPaid=e.other;rec.taxEstimated=true}}
   const img=d.preview;if(S.ctl)S.ctl.abort();
   S.recDraft=null;if(img)S.imgCache[rec.id]=img;
@@ -983,7 +984,7 @@ function vDash0(st){
   const goal=num(S.settings.incomeGoal),pct=goal?Math.min(100,Math.round(st.payB/goal*100)):0;
   const over=st.inv.filter(isOverdue);
   const recent=[...st.inv.filter(i=>i.status!=="quote").map(i=>({d:i.date,t:`Invoice ${i.number} · ${i.client||"no client"}`,v:invTotals(i).total,c:i.currency||"CAD",pos:true,act:"openInv",id:i.id})),...st.rec.map(r=>({d:r.date,t:`${r.vendor} · ${r.category}`,v:num(r.total),c:r.currency||"CAD",pos:false,act:"editRec",id:r.id}))].sort((a,b)=>(b.d||"").localeCompare(a.d||"")).slice(0,8);
-  return `${gmailCard()}<div class="row">${yearPicker()}</div>
+  return `${gmailCard()}${billLaterPanel()}<div class="row">${yearPicker()}</div>
 <div class="row">
   <button class="btn sm" data-act="pdf" ${S.busy.pdf?"disabled":""}>${S.busy.pdf?'<span class="spin"></span> Building PDF…':"Print year-end report"}</button>
   ${dropboxOn()?`<button class="btn sm" data-act="ledger" ${S.busy.ledger?"disabled":""}>${S.busy.ledger?'<span class="spin"></span> Backing up…':"Back up books to Dropbox"}</button>`:""}
@@ -1067,7 +1068,7 @@ function vInvoices(){
   const imp=S.invImport;
   const list=[...S.invoices].filter(i=>yearOf(i.date)===S.year).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
   const out=list.filter(i=>i.status==="sent");
-  return `${S.voice?voicePanel():""}<div class="row"><button class="btn gold" data-act="newInvoice">${ICON.pen}New invoice</button>
+  return `${S.voice?voicePanel():""}${billLaterPanel()}<div class="row"><button class="btn gold" data-act="newInvoice">${ICON.pen}New invoice</button>
 </div>
 ${imp?`<div class="panel ${imp.status==="error"?"":"hot"}">${imp.status==="error"?`<div class="err">${esc(imp.err)}</div><div class="row" style="margin-top:10px"><button class="btn sm ghost" data-act="clearImport">Dismiss</button></div>`:`<span class="spin"></span> ${imp.status==="reading"?"Reading the invoice. This can take up to a minute.":"Opening the file…"}`}</div>`:""}
 <div class="row">${yearPicker()}<span class="note">${list.length} invoices · ${out.length} waiting on payment</span></div>
@@ -1815,11 +1816,27 @@ ${s.status==="loading"?`<div class="note" style="padding:14px"><span class="spin
 function rbPromptHTML(inv){return S.rbPrompt===inv.id&&!S.rb?`<div class="rbpop" role="status"><span><b>${inv.status==="quote"?"Quote":"Invoice"} saved.</b> Read it back before you send it?</span><span class="row" style="gap:8px;flex-wrap:nowrap"><button class="btn sm gold" data-act="readBack" data-v="${inv.id}">Read back</button><button class="btn sm ghost" data-act="rbLater">Not now</button></span></div>`:""}
 function rbStatus(inv){return inv.rbSig&&inv.rbSig===invSig(inv)?`<span class="ok">✓ Read back and checked</span>`:`<span class="note">Not read back yet. <button class="btn sm ghost" data-act="readBack" data-v="${inv.id}">Read back</button></span>`}
 
+/* ———————————— bill later: receipts set aside for a client, turned into an invoice in one tap ———————————— */
+const shortDate=d=>{const m=String(d||"").match(/^(\d{4})-(\d{2})-(\d{2})/);return m?`${MON[+m[2]-1]} ${+m[3]}`:""};
+function knownClients(){const seen=new Set(),out=[];[...S.invoices].sort((a,b)=>(b.date||"").localeCompare(a.date||"")).forEach(i=>{const n=(i.client||"").trim(),k=clientKey(n).toLowerCase();if(n&&!seen.has(k)){seen.add(k);out.push(n)}});return out.slice(0,40)}
+function toBillGroups(){const g={};S.receipts.filter(r=>r.billLater&&!r.billedTo&&!isPersonal(r)).forEach(r=>{const k=clientKey(r.billLater).toLowerCase();(g[k]=g[k]||{name:r.billLater,rs:[]}).rs.push(r)});
+  return Object.values(g).map(x=>({...x,rs:x.rs.sort((a,b)=>(a.date||"").localeCompare(b.date||""))})).sort((a,b)=>b.rs.length-a.rs.length)}
+function billLaterPanel(){const gs=toBillGroups();if(!gs.length)return "";
+  return `<section class="panel hot"><div class="label">Ready to bill</div>${gs.map(x=>{const curs=[...new Set(x.rs.map(r=>r.currency||"CAD"))];const tot=curs.map(c=>money(x.rs.filter(r=>(r.currency||"CAD")===c).reduce((t,r)=>t+num(r.total),0),c)+(c!=="CAD"?" "+c:"")).join(" + ");
+    return `<div class="rowline" style="align-items:center;gap:10px"><span style="min-width:0"><b>${esc(x.name)}</b> <span class="dim">· ${x.rs.length} receipt${x.rs.length===1?"":"s"} · ${tot}</span><br><span class="note" style="font-size:12.5px">${x.rs.map(r=>esc(r.vendor)).join(", ")}</span></span><button class="btn sm gold" data-act="billNow" data-v="${esc(x.name)}">Make invoice</button></div>`}).join("")}</section>`}
+function startBillLater(name){const key=clientKey(name).toLowerCase();const rs=S.receipts.filter(r=>r.billLater&&!r.billedTo&&clientKey(r.billLater).toLowerCase()===key).sort((a,b)=>(a.date||"").localeCompare(b.date||""));if(!rs.length)return;
+  const inv=blankInvoice();const past=[...S.invoices].filter(i=>clientKey(i.client).toLowerCase()===key).sort((a,b)=>(b.date||"").localeCompare(a.date||""))[0];
+  inv.client=past?past.client:name;if(past){inv.clientAddress=past.clientAddress||"";inv.clientEmail=past.clientEmail||"";inv.forLabel=past.forLabel||inv.forLabel;inv.currency=past.currency||inv.currency;inv.taxType=past.taxType||inv.taxType;inv.taxRate=past.taxRate??inv.taxRate}
+  const curs=[...new Set(rs.map(r=>r.currency||"CAD"))];if(curs.length===1)inv.currency=curs[0];if(inv.currency!=="CAD"){inv.taxType="None";inv.taxRate=0}
+  inv.items=[{desc:"",qty:"1",rate:"",taxable:true,type:"pay"},...rs.map(r=>({desc:cleanText(`${r.vendor} reimbursement (${shortDate(r.date)})${(r.currency||"CAD")!==inv.currency?` ${r.currency} ${num(r.total).toFixed(2)}, convert`:""}`),qty:"1",rate:String(num(r.total)),taxable:false,type:"reimb",rid:r.id}))];
+  S.invEdit=inv;S.tab="invoices";S.invViewId=null;S.voice=null;S.vfix=null;S.gfind=null;S.invRc=null;S.picker=null;render(true);window.scrollTo({top:0});
+  toast(`Invoice started for ${inv.client} with ${rs.length} receipt${rs.length===1?"":"s"}. Add your pay on line 1, then save.`)}
+
 /* receipts */
 function vReceipts(){
   const RL=reimbLines();
   const d=S.recDraft,q=S.recSearch.trim().toLowerCase();
-  const rec=S.receipts.filter(r=>yearOf(r.date)===S.year).filter(r=>S.recFilter==="All"||(S.recFilter==="Needs review"?r.needsReview:S.recFilter==="Billed to clients"?!!r.billedTo:S.recFilter==="Maybe billed to clients"?!!billMatch(r,RL):r.category===S.recFilter)).filter(r=>!q||(r.vendor+" "+r.note+" "+r.category).toLowerCase().includes(q)).sort((a,b)=>(b.date||"").localeCompare(a.date||"")||(b.createdAt||0)-(a.createdAt||0));
+  const rec=S.receipts.filter(r=>yearOf(r.date)===S.year).filter(r=>S.recFilter==="All"||(S.recFilter==="Needs review"?r.needsReview:S.recFilter==="Billed to clients"?!!r.billedTo:S.recFilter==="To bill later"?!!(r.billLater&&!r.billedTo):S.recFilter==="Maybe billed to clients"?!!billMatch(r,RL):r.category===S.recFilter)).filter(r=>!q||(r.vendor+" "+r.note+" "+r.category).toLowerCase().includes(q)).sort((a,b)=>(b.date||"").localeCompare(a.date||"")||(b.createdAt||0)-(a.createdAt||0));
   const st=yearStats(S.year);const notBacked=S.receipts.filter(r=>r.backup!=="done").length;
   const sy=S.sync,bk=S.bulk;
   return `<div class="row">${captureButtons()}${syncButton()}<button class="btn ghost" data-act="manualRec">${ICON.pen}Add without photo</button></div>
@@ -1828,14 +1845,14 @@ ${(()=>{const n=S.receipts.filter(r=>yearOf(r.date)===S.year&&billMatch(r,RL)).l
 ${d?`<div id="recDraftBox" style="scroll-margin-top:12px">${vDraft(d)}</div>`:""}
 ${S.imgView?`<div class="panel">${S.imgView.loading?'<span class="spin"></span> Loading the photo…':S.imgView.url?`<img class="shot" src="${S.imgView.url}" alt="Receipt photo">`:'<div class="note">No saved photo for this receipt.</div>'}<div class="row" style="margin-top:10px"><button class="btn sm ghost" data-act="closeImg">Close</button></div></div>`:""}
 <div class="row">${yearPicker()}</div>
-<div class="row"><select id="recFilter" style="width:auto" data-act-change="recFilter" aria-label="Filter"><option>All</option><option ${S.recFilter==="Needs review"?"selected":""}>Needs review</option><option ${S.recFilter==="Billed to clients"?"selected":""}>Billed to clients</option><option ${S.recFilter==="Maybe billed to clients"?"selected":""}>Maybe billed to clients</option>${CATS.map(c=>`<option ${c===S.recFilter?"selected":""}>${esc(c)}</option>`).join("")}</select>
+<div class="row"><select id="recFilter" style="width:auto" data-act-change="recFilter" aria-label="Filter"><option>All</option><option ${S.recFilter==="Needs review"?"selected":""}>Needs review</option><option ${S.recFilter==="To bill later"?"selected":""}>To bill later</option><option ${S.recFilter==="Billed to clients"?"selected":""}>Billed to clients</option><option ${S.recFilter==="Maybe billed to clients"?"selected":""}>Maybe billed to clients</option>${CATS.map(c=>`<option ${c===S.recFilter?"selected":""}>${esc(c)}</option>`).join("")}</select>
 <input id="recSearch" type="search" placeholder="Search vendor or note" value="${esc(S.recSearch)}" data-search="1" style="flex:1;min-width:160px"></div>
 
 ${st.cats.length?`<details class="panel"><summary class="label" style="cursor:pointer">${S.year} write-offs by category (CAD, before tax) · ${money(st.expenses)}</summary>${st.cats.map(([c,v])=>`<div class="rowline"><span>${esc(c)}</span><span class="mono">${money(v)}</span></div>`).join("")}<div class="rowline dim"><span>${PERSONAL}</span><span class="mono">${money(st.personal)}</span></div></details>`:""}
 <div class="row" style="justify-content:space-between"><p class="note" style="margin:0">${rec.length} shown${(()=>{const n=rec.filter(r=>r.needsReview).length;return n?` · ${n} to check`:""})()}</p>${(()=>{const n=rec.filter(r=>r.needsReview).length;return n?`<button class="btn sm ${S.armed==="revAll"?"armed":"ghost"}" data-act="revAll">${S.armed==="revAll"?`Tap again to say yes to all ${n}`:`Yes to all ${n} shown`}</button>`:""})()}</div>
 ${rec.length?`<div class="list">${rec.map(r=>{const arm=S.armed==="rec:"+r.id;const m=billMatch(r,RL);return `<div class="panel item">
 <span class="mono dim" style="font-size:12.5px;min-width:86px">${esc(r.date)}</span>
-<span class="grow">${esc(r.vendor)}${r.note?`<span class="dim"> · ${esc(r.note)}</span>`:""}<br><span class="${isPersonal(r)?"dim":"goldc"}" style="font-size:12.5px">${esc(r.category)}</span>${r.needsReview?' <span class="chip ice">Check</span>':""}${r.url?` <a class="lnk" href="${esc(r.url)}" target="_blank" rel="noopener">email</a>`:""}</span>
+<span class="grow">${esc(r.vendor)}${r.note?`<span class="dim"> · ${esc(r.note)}</span>`:""}<br><span class="${isPersonal(r)?"dim":"goldc"}" style="font-size:12.5px">${esc(r.category)}</span>${r.needsReview?' <span class="chip ice">Check</span>':""}${r.billLater&&!r.billedTo?` <span class="chip goldc">Bill later · ${esc(r.billLater)}</span>`:""}${r.url?` <a class="lnk" href="${esc(r.url)}" target="_blank" rel="noopener">email</a>`:""}</span>
 ${!isCAD(r)?`<span class="chip goldc">${esc(r.currency)}</span>`:""}
 <span class="mono">${money(r.total,r.currency)}</span>
 ${r.hasImage?`<button class="btn sm ghost" data-act="viewImg" data-v="${r.id}">Photo</button>`:""}
@@ -1885,7 +1902,9 @@ ${d.currency==="CAD"?`<div class="field"><label class="label" for="rd-prov">Boug
 <div class="field" style="grid-column:1/-1;margin-top:-4px"><div id="rd-taxest" style="font-size:13.5px;line-height:1.45">${taxEstLine(d)}</div></div>`:""}
 ${(S.settings.streams||[]).some(x=>x.type==="business")?`<div class="field"><label class="label" for="rd-stream">Which business?</label><select id="rd-stream" data-bind="recDraft.stream"><option value="">${esc(S.settings.tagline||"Music")} (main)</option>${(S.settings.streams||[]).filter(x=>x.type==="business").map(x=>`<option value="${x.id}" ${d.stream===x.id?"selected":""}>${esc(x.name)}</option>`).join("")}</select></div>`:""}
 <div class="field"><label class="label" for="rd-cat">Category</label><select id="rd-cat" data-bind="recDraft.category" data-rerender="1" ${reading?"disabled":""}>${CATS.map(c=>`<option ${c===d.category?"selected":""}>${esc(c)}</option>`).join("")}</select></div>
-<div class="field" style="grid-column:1/-1"><label class="label" for="rd-note">Note</label><input id="rd-note" data-bind="recDraft.note" value="${esc(d.note)}" placeholder="What it was for" ${reading?"disabled":""}></div></div>
+<div class="field" style="grid-column:1/-1"><label class="label" for="rd-note">Note</label><input id="rd-note" data-bind="recDraft.note" value="${esc(d.note)}" placeholder="What it was for" ${reading?"disabled":""}></div>
+${isPersonal(d)||d.billedTo?"":`<div class="field billlater ${d.billLater?"on":""}" style="grid-column:1/-1"><label class="chk" style="padding:4px 0"><input type="checkbox" data-billlater="1" ${d.billLater?"checked":""} ${reading?"disabled":""}> <b>Bill later</b> <span class="note">· put this on a client's invoice</span></label>
+${d.billLater?`<input id="rd-billto" data-bind="recDraft.billTo" list="billto-list" autocomplete="off" placeholder="Who pays for this? (client name)" value="${esc(d.billTo||"")}"><datalist id="billto-list">${knownClients().map(n=>`<option value="${esc(n)}">`).join("")}</datalist><span class="note" style="font-size:12.5px">It waits in <b>Ready to bill</b> on the Invoices page until you make the invoice.</span>`:""}</div>`}</div>
 ${d.currency!=="CAD"?`<p class="note">Foreign receipt: kept as a record; its tax never enters your GST/HST claim.</p>`:""}
 ${d.category===PERSONAL?`<p class="note">Personal items stay out of write-offs and GST/HST credits.</p>`:""}
 ${d.category==="Vehicle & fuel"?`<p class="note">Vehicle costs count at your business-use % (${Math.round(factors(yearOf(d.date)).veh*100)}%), set on the Mileage tab.</p>`:""}
@@ -2040,6 +2059,7 @@ document.addEventListener("change",e=>{
   if(el.dataset.tplcheck&&S.tplDraft){S.tplDraft[el.dataset.tplcheck]=el.checked;render(true);return}
   if(el.dataset.tx!==undefined&&S.invEdit){S.invEdit.items[Number(el.dataset.tx)].taxable=el.checked;refreshTotals();return}
   if(el.dataset.mailto){const inv=S.invoices.find(i=>i.id===el.dataset.mailto);if(inv&&el.value.trim()!==inv.clientEmail)save({...inv,clientEmail:el.value.trim()},true);return}
+  if(el.dataset.billlater&&S.recDraft){S.recDraft.billLater=el.checked;render(true);if(el.checked)setTimeout(()=>{const b=$("#rd-billto");if(b)b.focus()},30);return}
   if(el.dataset.bind&&el.tagName==="SELECT"){setPath(el.dataset.bind,el.value);if(el.dataset.bind.startsWith("sf."))S.sfDirty=true;if(el.dataset.bind.startsWith("recDraft.")&&S.recDraft)S.recDraft.touched[el.dataset.bind.split(".")[1]]=true;if(el.dataset.rerender)render(true);refreshTotals()}
   if(el.dataset.tax){
     const sc=el.dataset.tax,k=el.value,p=TAX.find(x=>x.k===k);
@@ -2086,6 +2106,7 @@ document.addEventListener("click",async e=>{
   switch(a){
     case "tab":S.tab=v;S.invMail="";S.imgView=null;if(v!=="invoices")S.invViewId=null;render(true);window.scrollTo({top:0});break;
     case "year":S.year=Number(v);render(true);break;
+    case "billNow":startBillLater(v);break;
     case "newInvoice":S.tab="invoices";S.invViewId=null;S.voice=null;S.vfix=null;S.invEdit=blankInvoice();S.gfind=null;S.invRc=null;S.picker=null;render(true);break;
     case "editInv":{const inv=S.invoices.find(i=>i.id===v);if(inv){S.invEdit=JSON.parse(JSON.stringify(inv));S.invEdit.items=S.invEdit.items.map(it=>({desc:it.desc,qty:"1",rate:String(num(it.qty||1)*num(it.rate)),taxable:it.taxable!==false,type:lineType(it),...(it.rid?{rid:it.rid}:{})}))}S.tab="invoices";S.gfind=null;S.invRc=null;S.picker=null;render(true);break}
     case "openInv":S.packetMsg="";S.tab="invoices";S.invEdit=null;S.invViewId=v;S.invMail="";render(true);window.scrollTo({top:0});break;
@@ -2116,7 +2137,7 @@ document.addEventListener("click",async e=>{
     case "pdfInv":{const inv=S.invoices.find(i=>i.id===v);if(inv)downloadInvoicePdf(inv);break}
     case "mail":{const inv=S.invoices.find(i=>i.id===v);if(inv){const to=(inv._to??inv.clientEmail);emailInvoice({...inv,clientEmail:to})}break}
     case "manualRec":if(S.ctl)S.ctl.abort();S.recDraft=blankDraft();render(true);break;
-    case "editRec":{const r=S.receipts.find(x=>x.id===v);if(!r)break;S.tab="receipts";if(S.ctl)S.ctl.abort();S.recDraft=blankDraft({id:r.id,editOf:r.id,vendor:r.vendor,date:r.date,currency:r.currency||"CAD",total:String(r.total),taxPaid:r.taxEstimated?"":String(r.taxPaid),prov:r.prov||S.settings.homeProv||"",category:r.category,note:r.note||"",stream:r.stream||""});render(true);window.scrollTo({top:0});break}
+    case "editRec":{const r=S.receipts.find(x=>x.id===v);if(!r)break;S.tab="receipts";if(S.ctl)S.ctl.abort();S.recDraft=blankDraft({id:r.id,editOf:r.id,vendor:r.vendor,date:r.date,currency:r.currency||"CAD",total:String(r.total),taxPaid:r.taxEstimated?"":String(r.taxPaid),prov:r.prov||S.settings.homeProv||"",category:r.category,note:r.note||"",stream:r.stream||"",billLater:!!r.billLater,billTo:r.billLater&&r.billLater!=="No client yet"?r.billLater:"",billedTo:r.billedTo||""});render(true);window.scrollTo({top:0});break}
     case "fileRec":fileDraft();break;
     case "readAgain":readDraft();break;
     case "stopRead":if(S.ctl)S.ctl.abort();break;
