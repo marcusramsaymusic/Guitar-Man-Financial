@@ -176,7 +176,7 @@ async function prepFile(file){
 /* ———————————— Claude prompts ———————————— */
 const RECEIPT_PROMPT=`The image is a photo of a purchase receipt for a self-employed Canadian musician (session guitarist and producer) who tracks business write-offs and GST/HST input tax credits.
 Reply with only one JSON object:
-{"vendor": string, "date": "YYYY-MM-DD" or null, "currency": 3-letter code (CAD unless the receipt clearly shows another currency or a non-Canadian address), "total": number (grand total paid), "tax": number or null (the GST or HST amount printed on the receipt; 0 only if it prints GST/HST as $0; null if the receipt doesn't list GST/HST separately; for a non-Canadian receipt, any VAT/sales tax shown; never include PST, QST or RST), "province": two-letter Canadian province or territory code where it was bought (from the store address or phone number), or null, "category": one of ${JSON.stringify(CATS)}, "note": short description of what was bought}`;
+{"vendor": string, "date": "YYYY-MM-DD" or null (the purchase date. Canadian receipts print dates as MM/DD/YY or DD/MM/YY, e.g. 11/02/26 is usually November 2, 2026; when a date could be read either way, choose the reading closest to today, ${today()}, that is not in the future), "currency": 3-letter code (CAD unless the receipt clearly shows another currency or a non-Canadian address), "total": number (grand total paid), "tax": number or null (the GST or HST amount printed on the receipt; 0 only if it prints GST/HST as $0; null if the receipt doesn't list GST/HST separately; for a non-Canadian receipt, any VAT/sales tax shown; never include PST, QST or RST), "province": two-letter Canadian province or territory code where it was bought (from the store address or phone number), or null, "category": one of ${JSON.stringify(CATS)}, "note": short description of what was bought}`;
 const INVOICE_PROMPT=`The image is an invoice that a Canadian musician previously issued to a client. Reply with only one JSON object:
 {"number": string or null, "client": string, "clientAddress": string (newline-separated) or "", "clientEmail": string or null, "forLabel": string or "", "date": "YYYY-MM-DD" or null, "currency": 3-letter code, "items": [{"desc": string, "amount": number, "type": "pay" (fees, show/session/travel-day/rehearsal rates, production) or "perdiem" or "reimb" (expenses billed back: flights, bag fees, parking, rides, ferries, gas, gear bought for the client)}], "tax": number (GST/HST amount as printed, 0 if none), "total": number}`;
 function emailBatchPrompt(batch){
@@ -211,7 +211,7 @@ async function onReceiptFile(file){
   if(!file)return;
   S.tab="receipts";S.imgView=null;if(S.ctl)S.ctl.abort();
   const d=blankDraft({status:"preparing"});S.recDraft=d;render(true);
-  try{const p=await prepFile(file);if(S.recDraft!==d)return;d.blob=p.blob;d.preview=p.preview}
+  try{const p=await prepFile(file);if(S.recDraft!==d)return;d.blob=p.blob;d.preview=p.preview;if(p.preview)d.imgHash=strHash(p.preview)}
   catch(e){if(S.recDraft!==d)return;d.status="error";d.err=e.message;render(true);return}
   if(S.sample&&S.canImages)readDraft();
   else{d.status="manual";d.err="This offline version never sends anything off your device, so type the details in. The photo is kept with the receipt.";render(true)}
@@ -221,10 +221,10 @@ async function readDraft(){
   d.status="reading";d.err="";render(true);
   const ctl=new AbortController();S.ctl=ctl;
   try{
-    const x=await S.sample.json(RECEIPT_PROMPT,{images:[d.blob],signal:ctl.signal});
+    const x=await readReceiptImage(d.blob);if(ctl.signal.aborted)return;
     if(S.recDraft!==d)return;
     const put=(k,v)=>{if(!d.touched[k]&&v!==undefined&&v!==null&&v!=="")d[k]=v};
-    put("vendor",x.vendor);put("date",/^\d{4}-\d{2}-\d{2}$/.test(x.date||"")?x.date:null);
+    put("vendor",x.vendor);put("date",/^\d{4}-\d{2}-\d{2}$/.test(x.date||"")?fixPhotoDate(x.date):null);
     put("currency",CURS.includes(x.currency)?x.currency:null);
     put("total",x.total!=null?String(num(x.total)):null);if(!d.touched.taxPaid)d.taxPaid=x.tax===null||x.tax===undefined||x.tax===""?"":String(num(x.tax));if(provOf(x.province))put("prov",x.province);
     put("category",CATS.includes(x.category)?x.category:null);put("note",x.note);
@@ -235,14 +235,14 @@ async function readDraft(){
 async function fileDraft(){
   const d=S.recDraft;if(!d)return;
   const prev=d.editOf?S.receipts.find(r=>r.id===d.editOf):null;
-  const rec={...(prev||{}),kind:"receipt",id:prev?prev.id:"rec_"+d.id,stream:d.stream||"",vendor:(d.vendor||"").trim()||"Unnamed vendor",date:d.date||today(),currency:d.currency,total:num(d.total),taxPaid:num(d.taxPaid),taxEstimated:false,pstPaid:0,prov:d.prov||"",category:d.category,note:(d.note||"").trim(),needsReview:false,
+  const rec={...(prev||{}),...(d.imgHash?{imgHash:d.imgHash}:{}),kind:"receipt",id:prev?prev.id:"rec_"+d.id,stream:d.stream||"",vendor:(d.vendor||"").trim()||"Unnamed vendor",date:d.date||today(),currency:d.currency,total:num(d.total),taxPaid:num(d.taxPaid),taxEstimated:false,pstPaid:0,prov:d.prov||"",category:d.category,note:(d.note||"").trim(),needsReview:false,
     hasImage:prev?!!prev.hasImage||!!d.preview:!!d.preview,backup:prev?(prev.backup==="done"&&(prev.category!==d.category||prev.date!==d.date)?"moved":prev.backup):(S.mcp?"pending":"off"),createdAt:prev?.createdAt||Date.now()};
   rec.billLater=d.billLater&&!isPersonal(rec)&&!rec.billedTo?((d.billTo||"").trim()||"No client yet"):"";
   if(rec.currency==="CAD"&&String(d.taxPaid??"").trim()===""&&!isPersonal(rec)){const e=taxSplit(rec.total,d.prov,rec.category);if(e){rec.taxPaid=e.claim;rec.pstPaid=e.other;rec.taxEstimated=true}}
   const img=d.preview;if(S.ctl)S.ctl.abort();
   S.recDraft=null;if(img)S.imgCache[rec.id]=img;
   await save(rec);
-  if(img&&S.col){try{await S.col.doc("img_"+rec.id).set({kind:"image",data:img})}catch(e){toast("Receipt filed, but the photo copy couldn't be saved. "+dbErr(e))}}
+  if(img&&S.col&&!(await saveImageDoc(rec.id,img)))toast("Receipt filed, but the photo copy couldn't be saved. Try Edit › Save again later.");
   toast(prev?"Receipt updated.":"Receipt filed.");
   if(!prev&&dropboxOn())backupReceipt(rec.id);
 }
@@ -1832,33 +1832,52 @@ function startBillLater(name){const key=clientKey(name).toLowerCase();const rs=S
   S.invEdit=inv;S.tab="invoices";S.invViewId=null;S.voice=null;S.vfix=null;S.gfind=null;S.invRc=null;S.picker=null;render(true);window.scrollTo({top:0});
   toast(`Invoice started for ${inv.client} with ${rs.length} receipt${rs.length===1?"":"s"}. Add your pay on line 1, then save.`)}
 
+/* ———————————— receipt photo helpers: date sanity, duplicates, sturdier reading ———————————— */
+function fixPhotoDate(s){if(!/^\d{4}-\d{2}-\d{2}$/.test(s||""))return s;const [y,m,d]=s.split("-").map(Number);if(d>12||m===d)return s;
+  const alt=`${y}-${String(d).padStart(2,"0")}-${String(m).padStart(2,"0")}`;const t=Date.parse(today()),a1=(t-Date.parse(s))/864e5,a2=(t-Date.parse(alt))/864e5;
+  const ok=a=>a>=-2;if(!ok(a1)&&ok(a2))return alt;if(ok(a1)&&ok(a2)&&a2<a1&&a1>45)return alt;return s}
+function strHash(str){let h=2166136261>>>0;for(let i=0;i<str.length;i+=7){h^=str.charCodeAt(i);h=Math.imul(h,16777619)>>>0}return h.toString(36)+"_"+str.length}
+const vendKey=v=>String(v||"").toLowerCase().replace(/[^a-z0-9]/g,"").slice(0,6);
+function findDupReceipt(rec,exceptId){return S.receipts.find(r=>r.id!==exceptId&&r.id!==rec.id&&((rec.imgHash&&r.imgHash===rec.imgHash)||(num(rec.total)>0&&Math.abs(num(r.total)-num(rec.total))<=.01&&r.date===rec.date&&vendKey(r.vendor)===vendKey(rec.vendor))))}
+async function readReceiptImage(blob){let last=null;
+  for(let a=0;a<3;a++){const ctl=new AbortController();const tm=setTimeout(()=>ctl.abort(),120000);
+    try{const x=await S.sample.json(RECEIPT_PROMPT,{images:[blob],signal:ctl.signal});clearTimeout(tm);if(x&&typeof x==="object")return x;last=new Error("empty")}
+    catch(e){clearTimeout(tm);last=e;if(e&&(e.code==="not_granted"))throw e;await new Promise(r=>setTimeout(r,e&&e.code==="rate_limited"?6000:2000))}}
+  throw last||new Error("read failed")}
+async function saveImageDoc(id,data){for(let a=0;a<2;a++){try{await S.col.doc("img_"+id).set({kind:"image",data});return true}catch{await new Promise(r=>setTimeout(r,1200))}}return false}
+
 /* ———————————— several receipts at once from the camera roll ———————————— */
 async function onReceiptBatch(files){
   files=files.filter(Boolean);if(!files.length)return;if(files.length===1)return onReceiptFile(files[0]);
   if(S.batch&&S.batch.running){toast("Still adding the last batch. Try again when it's done.");return}
-  S.tab="receipts";S.imgView=null;S.recDraft=null;const B=S.batch={running:true,total:files.length,done:0,ids:[],fail:[],billTo:S.batch&&S.batch.billTo||"",stop:false};render(true);window.scrollTo({top:0});
+  S.tab="receipts";S.imgView=null;S.recDraft=null;const B=S.batch={running:true,total:files.length,done:0,ids:[],fail:[],billTo:"",billSet:"",stop:false,dups:[],unread:0};render(true);window.scrollTo({top:0});
   const ai=!!(S.sample&&S.canImages);
   for(let i=0;i<files.length&&!B.stop;i++){B.current=i+1;batchDraw();
     try{const p=await prepFile(files[i]);if(!p||!p.preview||!p.blob)throw new Error("couldn't open this photo");
-      const rec={kind:"receipt",id:"rec_"+newId(),vendor:`Receipt ${i+1} of ${files.length}`,date:today(),currency:S.settings.defaultCurrency||"CAD",total:0,taxPaid:0,category:"Other",note:"",needsReview:true,hasImage:true,backup:"off",source:"photos",createdAt:Date.now()+i};
-      if(ai){try{const x=await S.sample.json(RECEIPT_PROMPT,{images:[p.blob]});
-        rec.vendor=cleanText(x.vendor||rec.vendor).slice(0,80);if(/^\d{4}-\d{2}-\d{2}$/.test(x.date||""))rec.date=x.date;if(CURS.includes(x.currency))rec.currency=x.currency;rec.total=num(x.total);
+      const rec={kind:"receipt",id:"rec_"+newId(),vendor:"Couldn't read this one",date:today(),currency:S.settings.defaultCurrency||"CAD",total:0,taxPaid:0,category:"Other",note:"Open it and tap Read again, or fill it in",needsReview:true,hasImage:true,backup:"off",source:"photos",imgHash:strHash(p.preview),createdAt:Date.now()+i};
+      const dupImg=findDupReceipt(rec);if(dupImg){B.dups.push(`${dupImg.vendor} · ${money(dupImg.total,dupImg.currency)} · ${fmtDate(dupImg.date,"mmm d, yyyy")}`);B.done=i+1;batchDraw();continue}
+      if(ai){try{const x=await readReceiptImage(p.blob);
+        rec.vendor=cleanText(x.vendor||"Receipt").slice(0,80);if(/^\d{4}-\d{2}-\d{2}$/.test(x.date||""))rec.date=fixPhotoDate(x.date);if(CURS.includes(x.currency))rec.currency=x.currency;rec.total=num(x.total);
         rec.taxPaid=rec.currency==="CAD"?num(x.tax):0;if(CATS.includes(x.category))rec.category=x.category;rec.note=cleanText(x.note||"").slice(0,140);withTaxEst(rec,x);rec.needsReview=!num(x.total)}
-        catch(e){if(e&&e.code==="not_granted"){B.stop=true;B.fail.push(`${files[i].name||"Photo "+(i+1)}: Claude reading was turned off`)}}}
-      const bt=(B.billTo||"").trim();if(bt&&!isPersonal(rec))rec.billLater=bt;
+        catch(e){if(e&&e.code==="not_granted"){B.stop=true;B.fail.push("Claude reading is turned off for this page, so the rest weren't read")}else B.unread++}}
+      else{rec.vendor=`Receipt ${i+1} of ${files.length}`;rec.note=""}
+      const dup=findDupReceipt(rec);if(dup&&num(rec.total)>0){B.dups.push(`${dup.vendor} · ${money(dup.total,dup.currency)} · ${fmtDate(dup.date,"mmm d, yyyy")}`);B.done=i+1;batchDraw();continue}
+      const bt=(B.billSet||"").trim();if(bt&&!isPersonal(rec))rec.billLater=bt;
       S.imgCache[rec.id]=p.preview;await save(rec,true);
-      if(S.col){try{await S.col.doc("img_"+rec.id).set({kind:"image",data:p.preview})}catch{}}
+      if(S.col&&!(await saveImageDoc(rec.id,p.preview)))B.fail.push(`${rec.vendor}: the photo copy didn't save, the details did`);
       B.ids.push(rec.id)}
     catch(e){B.fail.push(`${files[i].name||"Photo "+(i+1)}: ${(e&&e.message)||"couldn't open it"}`)}
     B.done=i+1;batchDraw()}
-  B.running=false;S.recFilter=S.recFilter||"All";render(true);
-  toast(`${B.ids.length} receipt${B.ids.length===1?"":"s"} added${ai?". Check the ones marked Check.":". Fill in the details for each one."}`)}
+  B.running=false;const last=(B.billTo||"").trim();if(last)await batchApplyBill(B,last,true);
+  batchDraw();render();
+  toast(`${B.ids.length} receipt${B.ids.length===1?"":"s"} added${B.dups.length?`, ${B.dups.length} already there`:""}.`)}
+async function batchApplyBill(B,bt,quiet){B.billSet=bt;let n=0;for(const id of B.ids){const r=S.receipts.find(x=>x.id===id);if(r&&!r.billedTo&&!isPersonal(r)&&r.billLater!==bt){await save({...r,billLater:bt},true);n++}}if(!quiet&&n)toast(`${B.ids.length} receipt${B.ids.length===1?"":"s"} set to bill later to ${bt}.`);return n}
 function batchPanel(){const B=S.batch;if(!B)return "";const pct=Math.round(B.done/B.total*100);
   return `<section class="panel hot" id="batchBox"><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><b>${B.running?`<span class="spin"></span> Adding receipts · ${B.done} of ${B.total}`:`${B.ids.length} of ${B.total} receipts added`}</b>${B.running?`<button class="btn sm ghost" data-act="batchStop">Stop</button>`:`<button class="btn sm ghost" data-act="batchDone">Done</button>`}</div>
 <div class="bar" style="margin:10px 0"><span style="width:${pct}%"></span></div>
 ${B.running?`<p class="note" style="margin:0 0 8px">${S.sample&&S.canImages?"Claude is reading each photo. You can keep using the app.":"Saving the photos. You'll fill in the amounts afterwards."}</p>`:`<p class="note" style="margin:0 0 8px">${B.ids.length?`They're in the list below. Anything marked <b>Check</b> needs a quick look.`:""}</p>`}
-${B.fail.length?`<div class="err" style="margin-bottom:8px">${B.fail.map(esc).join("<br>")}</div>`:""}
-<label class="label" for="batch-billto">Bill all of these later to (optional)</label><div class="row" style="flex-wrap:nowrap;margin-top:4px"><input id="batch-billto" data-bind="batch.billTo" list="billto-list2" placeholder="Client name" value="${esc(B.billTo||"")}" autocomplete="off"><datalist id="billto-list2">${knownClients().map(n=>`<option value="${esc(n)}">`).join("")}</datalist>${!B.running&&B.ids.length?`<button class="btn sm" data-act="batchBill">Apply</button>`:""}</div></section>`}
+${B.dups.length?`<div class="note" style="margin-bottom:8px">Skipped ${B.dups.length} you already had: ${B.dups.map(esc).join("; ")}</div>`:""}${B.unread?`<div class="note" style="margin-bottom:8px">${B.unread} couldn't be read. They're saved with the photo as “Couldn't read this one”: open each and tap <b>Read again</b>.</div>`:""}${B.fail.length?`<div class="err" style="margin-bottom:8px">${B.fail.map(esc).join("<br>")}</div>`:""}
+<label class="label" for="batch-billto">Bill all of these later to (optional)</label>${B.billSet?`<div class="ok" style="font-size:13px;margin:2px 0">✓ All ${B.running?"":B.ids.length+" "}set to bill later to ${esc(B.billSet)}</div>`:""}<div class="row" style="flex-wrap:nowrap;margin-top:4px"><input id="batch-billto" data-bind="batch.billTo" list="billto-list2" placeholder="Client name" value="${esc(B.billTo||"")}" autocomplete="off"><datalist id="billto-list2">${knownClients().map(n=>`<option value="${esc(n)}">`).join("")}</datalist>${!B.running&&B.ids.length?`<button class="btn sm" data-act="batchBill">Apply</button>`:""}</div></section>`}
 function batchDraw(){const el=$("#batchBox");if(!el){if(S.tab==="receipts")render();return}
   const ae=document.activeElement,typing=ae&&ae.id==="batch-billto";if(typing){const b=el.querySelector("b");if(b)b.innerHTML=S.batch.running?`<span class="spin"></span> Adding receipts · ${S.batch.done} of ${S.batch.total}`:`${S.batch.ids.length} of ${S.batch.total} receipts added`;const bar=el.querySelector(".bar span");if(bar)bar.style.width=Math.round(S.batch.done/S.batch.total*100)+"%";return}
   el.outerHTML=batchPanel()}
@@ -1922,7 +1941,7 @@ function vDraft(d){
 <div class="row" style="align-items:flex-start;gap:16px">${d.preview?`<img class="thumb" src="${d.preview}" alt="Receipt photo">`:""}
 <div style="flex:1;min-width:220px;display:flex;flex-direction:column;gap:8px"><span class="plaque" style="cursor:default;align-self:flex-start">${d.editOf?"Edit receipt":"Check &amp; file"}</span>
 ${reading?`<div class="note"><span class="spin"></span> Reading the receipt. Usually 10 to 40 seconds.</div><div><button class="btn sm ghost" data-act="stopRead">Stop</button></div>`:""}
-${d.status==="read"?`<div class="ok">Read it. Check the numbers, then file it.</div>`:""}${d.err?`<div class="err">${esc(d.err)}</div>`:""}</div></div>
+${d.status==="read"?`<div class="ok">Read it. Check the numbers, then file it.</div>`:""}${(()=>{const du=!d.editOf&&findDupReceipt({imgHash:d.imgHash,total:d.total,date:d.date,vendor:d.vendor});return du?`<div class="err">Looks like you already have this one: ${esc(du.vendor)} · ${money(du.total,du.currency)} · ${esc(fmtDate(du.date,"mmm d, yyyy"))}. Discard it, or file it anyway if it's a different purchase.</div>`:""})()}${d.err?`<div class="err">${esc(d.err)}</div>`:""}</div></div>
 <div class="grid3" style="margin-top:14px">
 <div class="field"><label class="label" for="rd-vendor">Vendor</label><input id="rd-vendor" data-bind="recDraft.vendor" value="${esc(d.vendor)}" ${reading?"disabled":""}></div>
 <div class="field"><label class="label" for="rd-date">Date</label><input id="rd-date" type="date" data-bind="recDraft.date" value="${esc(d.date)}" ${reading?"disabled":""}></div>
@@ -2090,6 +2109,7 @@ document.addEventListener("change",e=>{
   if(el.dataset.tplcheck&&S.tplDraft){S.tplDraft[el.dataset.tplcheck]=el.checked;render(true);return}
   if(el.dataset.tx!==undefined&&S.invEdit){S.invEdit.items[Number(el.dataset.tx)].taxable=el.checked;refreshTotals();return}
   if(el.dataset.mailto){const inv=S.invoices.find(i=>i.id===el.dataset.mailto);if(inv&&el.value.trim()!==inv.clientEmail)save({...inv,clientEmail:el.value.trim()},true);return}
+  if(el.id==="batch-billto"&&S.batch){const bt=(el.value||"").trim();S.batch.billTo=el.value;if(bt)batchApplyBill(S.batch,bt,S.batch.running).then(()=>{if(!S.batch||!S.batch.running)render()});return}
   if(el.dataset.billlater&&S.recDraft){S.recDraft.billLater=el.checked;render(true);if(el.checked)setTimeout(()=>{const b=$("#rd-billto");if(b)b.focus()},30);return}
   if(el.dataset.bind&&el.tagName==="SELECT"){setPath(el.dataset.bind,el.value);if(el.dataset.bind.startsWith("sf."))S.sfDirty=true;if(el.dataset.bind.startsWith("recDraft.")&&S.recDraft)S.recDraft.touched[el.dataset.bind.split(".")[1]]=true;if(el.dataset.rerender)render(true);refreshTotals()}
   if(el.dataset.tax){
@@ -2139,7 +2159,7 @@ document.addEventListener("click",async e=>{
     case "year":S.year=Number(v);render(true);break;
     case "batchStop":if(S.batch)S.batch.stop=true;toast("Stopping after this one.");break;
     case "batchDone":S.batch=null;render(true);break;
-    case "batchBill":{const B=S.batch;const bt=(B&&B.billTo||"").trim();if(!B||!bt)break;let n=0;for(const id of B.ids){const r=S.receipts.find(x=>x.id===id);if(r&&!r.billedTo&&!isPersonal(r)){await save({...r,billLater:bt},true);n++}}toast(`${n} receipt${n===1?"":"s"} set to bill later to ${bt}.`);render(true);break}
+    case "batchBill":{const B=S.batch;const bt=(B&&B.billTo||"").trim();if(!B||!bt)break;await batchApplyBill(B,bt,false);render(true);break}
     case "billNow":startBillLater(v);break;
     case "newInvoice":S.tab="invoices";S.invViewId=null;S.voice=null;S.vfix=null;S.invEdit=blankInvoice();S.gfind=null;S.invRc=null;S.picker=null;render(true);break;
     case "editInv":{const inv=S.invoices.find(i=>i.id===v);if(inv){S.invEdit=JSON.parse(JSON.stringify(inv));S.invEdit.items=S.invEdit.items.map(it=>({desc:it.desc,qty:"1",rate:String(num(it.qty||1)*num(it.rate)),taxable:it.taxable!==false,type:lineType(it),...(it.rid?{rid:it.rid}:{})}))}S.tab="invoices";S.gfind=null;S.invRc=null;S.picker=null;render(true);break}
@@ -2171,7 +2191,7 @@ document.addEventListener("click",async e=>{
     case "pdfInv":{const inv=S.invoices.find(i=>i.id===v);if(inv)downloadInvoicePdf(inv);break}
     case "mail":{const inv=S.invoices.find(i=>i.id===v);if(inv){const to=(inv._to??inv.clientEmail);emailInvoice({...inv,clientEmail:to})}break}
     case "manualRec":if(S.ctl)S.ctl.abort();S.recDraft=blankDraft();render(true);break;
-    case "editRec":{const r=S.receipts.find(x=>x.id===v);if(!r)break;S.tab="receipts";if(S.ctl)S.ctl.abort();S.recDraft=blankDraft({id:r.id,editOf:r.id,vendor:r.vendor,date:r.date,currency:r.currency||"CAD",total:String(r.total),taxPaid:r.taxEstimated?"":String(r.taxPaid),prov:r.prov||S.settings.homeProv||"",category:r.category,note:r.note||"",stream:r.stream||"",billLater:!!r.billLater,billTo:r.billLater&&r.billLater!=="No client yet"?r.billLater:"",billedTo:r.billedTo||""});render(true);window.scrollTo({top:0});break}
+    case "editRec":{const r=S.receipts.find(x=>x.id===v);if(!r)break;if(r.hasImage)getImage(r.id).then(u=>{const d=S.recDraft;if(!u||!d||d.editOf!==r.id)return;d.preview=u;d.blob=dataUrlBlob(u);render(true)});S.tab="receipts";if(S.ctl)S.ctl.abort();S.recDraft=blankDraft({id:r.id,editOf:r.id,vendor:r.vendor,date:r.date,currency:r.currency||"CAD",total:String(r.total),taxPaid:r.taxEstimated?"":String(r.taxPaid),prov:r.prov||S.settings.homeProv||"",category:r.category,note:r.note||"",stream:r.stream||"",billLater:!!r.billLater,billTo:r.billLater&&r.billLater!=="No client yet"?r.billLater:"",billedTo:r.billedTo||""});render(true);window.scrollTo({top:0});break}
     case "fileRec":fileDraft();break;
     case "readAgain":readDraft();break;
     case "stopRead":if(S.ctl)S.ctl.abort();break;
