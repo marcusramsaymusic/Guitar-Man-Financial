@@ -928,7 +928,7 @@ function setlist(){return `<section class="panel setlist"><div class="label">Ton
 1. Shoot to Bill (new invoice) · 2. Thunderstruck (sync Gmail) · 3. Whole Lotta Receipts · 4. Ride On (reimbursements) · 5. Highway to the Gig (mileage) · 6. High Voltage (GST/HST) · 7. Hells Bells (tax set-aside) · 8. Money Talks (getting paid) · Encore: For Those About to Pay (We Salute You)</div></section>`}
 
 /* ———————————— rendering ———————————— */
-function editingNow(){return (S.tab==="invoices"&&S.invEdit)||(S.tab==="receipts"&&S.recDraft&&S.recDraft.status!=="preparing"&&S.recDraft.status!=="reading")||(S.tab==="settings"&&(S.sfDirty||S.tplDraft||S.logoDraft||S.erase||(S.cloudUI&&(S.cloudUI.pass||S.cloudUI.pass2))))||(S.tab==="invoices"&&S.voice)||(S.tab==="other"&&S.incForm&&(S.incForm.amount||S.incForm.note))||(S.tab==="mileage"&&S.tripDirty)}
+function editingNow(){return (S.tab==="invoices"&&S.invEdit)||(S.tab==="receipts"&&S.recDraft&&S.recDraft.status!=="preparing"&&S.recDraft.status!=="reading")||(S.tab==="settings"&&(S.sfDirty||S.tplDraft||S.logoDraft||S.erase||(S.cloudUI&&(S.cloudUI.pass||S.cloudUI.pass2))))||(S.tab==="invoices"&&S.voice)||(S.tab==="other"&&S.incForm&&(S.incForm.amount||S.incForm.note))||(S.tab==="mileage"&&S.tripDirty)||(S.tab==="receipts"&&S.batch&&document.activeElement&&document.activeElement.id==="batch-billto")}
 function renderChrome(){
   applyTheme();applyLogo();const deco=$("#themeDeco");if(deco){const want=themeNow()==="acdc"?"acdc":"";if(deco.dataset.t!==want){deco.dataset.t=want;deco.innerHTML=want?GUITAR_SVG+ampStrip():""}}
   const sync=$("#sync");
@@ -941,7 +941,7 @@ function render(force){renderChrome();if(!force&&editingNow())return;$("#view").
 function msgLine(m){if(!m)return"";const [k,...r]=m.split(":");return `<div class="${k==="ok"?"ok":"err"}">${esc(r.join(":"))}</div>`}
 function years(){const ys=new Set([new Date().getFullYear()]);S.invoices.forEach(i=>ys.add(yearOf(i.date)));S.receipts.forEach(r=>ys.add(yearOf(r.date)));return[...ys].sort((a,b)=>b-a)}
 function yearPicker(){return `<div class="row" role="group" aria-label="Year">${years().map(y=>`<button class="btn sm ${y===S.year?"gold":"ghost"}" data-act="year" data-v="${y}">${y}</button>`).join("")}</div>`}
-function captureButtons(){return `<label tabindex="0" role="button" class="btn gold" for="camIn">${ICON.cam}Take photo</label><label tabindex="0" role="button" class="btn" for="libIn">${ICON.up}Upload photo or PDF</label>`}
+function captureButtons(){return `<label tabindex="0" role="button" class="btn gold" for="camIn">${ICON.cam}Take photo</label><label tabindex="0" role="button" class="btn" for="libIn">${ICON.up}Upload photos or PDFs</label>`}
 
 function syncButton(){if(!gmailOn())return "";const sy=S.sync,busy=sy&&(sy.phase==="search"||sy.phase==="read");return `<button class="btn gold" data-act="sync" ${busy?"disabled":""}>${busy?'<span class="spin"></span> Syncing Gmail…':ICON.mail+"Sync Gmail"}</button>`}
 function gmailCard(){if(!gmailOn())return "";const sy=S.sync,busy=sy&&(sy.phase==="search"||sy.phase==="read");const last=S.settings.gmailSyncedThrough;
@@ -1832,6 +1832,37 @@ function startBillLater(name){const key=clientKey(name).toLowerCase();const rs=S
   S.invEdit=inv;S.tab="invoices";S.invViewId=null;S.voice=null;S.vfix=null;S.gfind=null;S.invRc=null;S.picker=null;render(true);window.scrollTo({top:0});
   toast(`Invoice started for ${inv.client} with ${rs.length} receipt${rs.length===1?"":"s"}. Add your pay on line 1, then save.`)}
 
+/* ———————————— several receipts at once from the camera roll ———————————— */
+async function onReceiptBatch(files){
+  files=files.filter(Boolean);if(!files.length)return;if(files.length===1)return onReceiptFile(files[0]);
+  if(S.batch&&S.batch.running){toast("Still adding the last batch. Try again when it's done.");return}
+  S.tab="receipts";S.imgView=null;S.recDraft=null;const B=S.batch={running:true,total:files.length,done:0,ids:[],fail:[],billTo:S.batch&&S.batch.billTo||"",stop:false};render(true);window.scrollTo({top:0});
+  const ai=!!(S.sample&&S.canImages);
+  for(let i=0;i<files.length&&!B.stop;i++){B.current=i+1;batchDraw();
+    try{const p=await prepFile(files[i]);if(!p||!p.preview||!p.blob)throw new Error("couldn't open this photo");
+      const rec={kind:"receipt",id:"rec_"+newId(),vendor:`Receipt ${i+1} of ${files.length}`,date:today(),currency:S.settings.defaultCurrency||"CAD",total:0,taxPaid:0,category:"Other",note:"",needsReview:true,hasImage:true,backup:"off",source:"photos",createdAt:Date.now()+i};
+      if(ai){try{const x=await S.sample.json(RECEIPT_PROMPT,{images:[p.blob]});
+        rec.vendor=cleanText(x.vendor||rec.vendor).slice(0,80);if(/^\d{4}-\d{2}-\d{2}$/.test(x.date||""))rec.date=x.date;if(CURS.includes(x.currency))rec.currency=x.currency;rec.total=num(x.total);
+        rec.taxPaid=rec.currency==="CAD"?num(x.tax):0;if(CATS.includes(x.category))rec.category=x.category;rec.note=cleanText(x.note||"").slice(0,140);withTaxEst(rec,x);rec.needsReview=!num(x.total)}
+        catch(e){if(e&&e.code==="not_granted"){B.stop=true;B.fail.push(`${files[i].name||"Photo "+(i+1)}: Claude reading was turned off`)}}}
+      const bt=(B.billTo||"").trim();if(bt&&!isPersonal(rec))rec.billLater=bt;
+      S.imgCache[rec.id]=p.preview;await save(rec,true);
+      if(S.col){try{await S.col.doc("img_"+rec.id).set({kind:"image",data:p.preview})}catch{}}
+      B.ids.push(rec.id)}
+    catch(e){B.fail.push(`${files[i].name||"Photo "+(i+1)}: ${(e&&e.message)||"couldn't open it"}`)}
+    B.done=i+1;batchDraw()}
+  B.running=false;S.recFilter=S.recFilter||"All";render(true);
+  toast(`${B.ids.length} receipt${B.ids.length===1?"":"s"} added${ai?". Check the ones marked Check.":". Fill in the details for each one."}`)}
+function batchPanel(){const B=S.batch;if(!B)return "";const pct=Math.round(B.done/B.total*100);
+  return `<section class="panel hot" id="batchBox"><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><b>${B.running?`<span class="spin"></span> Adding receipts · ${B.done} of ${B.total}`:`${B.ids.length} of ${B.total} receipts added`}</b>${B.running?`<button class="btn sm ghost" data-act="batchStop">Stop</button>`:`<button class="btn sm ghost" data-act="batchDone">Done</button>`}</div>
+<div class="bar" style="margin:10px 0"><span style="width:${pct}%"></span></div>
+${B.running?`<p class="note" style="margin:0 0 8px">${S.sample&&S.canImages?"Claude is reading each photo. You can keep using the app.":"Saving the photos. You'll fill in the amounts afterwards."}</p>`:`<p class="note" style="margin:0 0 8px">${B.ids.length?`They're in the list below. Anything marked <b>Check</b> needs a quick look.`:""}</p>`}
+${B.fail.length?`<div class="err" style="margin-bottom:8px">${B.fail.map(esc).join("<br>")}</div>`:""}
+<label class="label" for="batch-billto">Bill all of these later to (optional)</label><div class="row" style="flex-wrap:nowrap;margin-top:4px"><input id="batch-billto" data-bind="batch.billTo" list="billto-list2" placeholder="Client name" value="${esc(B.billTo||"")}" autocomplete="off"><datalist id="billto-list2">${knownClients().map(n=>`<option value="${esc(n)}">`).join("")}</datalist>${!B.running&&B.ids.length?`<button class="btn sm" data-act="batchBill">Apply</button>`:""}</div></section>`}
+function batchDraw(){const el=$("#batchBox");if(!el){if(S.tab==="receipts")render();return}
+  const ae=document.activeElement,typing=ae&&ae.id==="batch-billto";if(typing){const b=el.querySelector("b");if(b)b.innerHTML=S.batch.running?`<span class="spin"></span> Adding receipts · ${S.batch.done} of ${S.batch.total}`:`${S.batch.ids.length} of ${S.batch.total} receipts added`;const bar=el.querySelector(".bar span");if(bar)bar.style.width=Math.round(S.batch.done/S.batch.total*100)+"%";return}
+  el.outerHTML=batchPanel()}
+
 /* receipts */
 function vReceipts(){
   const RL=reimbLines();
@@ -1842,7 +1873,7 @@ function vReceipts(){
   return `<div class="row">${captureButtons()}${syncButton()}<button class="btn ghost" data-act="manualRec">${ICON.pen}Add without photo</button></div>
 ${syncPanel()}
 ${(()=>{const n=S.receipts.filter(r=>yearOf(r.date)===S.year&&billMatch(r,RL)).length;return n&&S.recFilter!=="Maybe billed to clients"?`<div class="panel hot row" style="justify-content:space-between"><span><b>${n}</b> receipts match reimbursement lines on your invoices. Linking them keeps them out of your own write-offs.</span><button class="btn sm gold" data-act="showMaybeBilled">Check them</button></div>`:""})()}
-${d?`<div id="recDraftBox" style="scroll-margin-top:12px">${vDraft(d)}</div>`:""}
+${batchPanel()}${d?`<div id="recDraftBox" style="scroll-margin-top:12px">${vDraft(d)}</div>`:""}
 ${S.imgView?`<div class="panel">${S.imgView.loading?'<span class="spin"></span> Loading the photo…':S.imgView.url?`<img class="shot" src="${S.imgView.url}" alt="Receipt photo">`:'<div class="note">No saved photo for this receipt.</div>'}<div class="row" style="margin-top:10px"><button class="btn sm ghost" data-act="closeImg">Close</button></div></div>`:""}
 <div class="row">${yearPicker()}</div>
 <div class="row"><select id="recFilter" style="width:auto" data-act-change="recFilter" aria-label="Filter"><option>All</option><option ${S.recFilter==="Needs review"?"selected":""}>Needs review</option><option ${S.recFilter==="To bill later"?"selected":""}>To bill later</option><option ${S.recFilter==="Billed to clients"?"selected":""}>Billed to clients</option><option ${S.recFilter==="Maybe billed to clients"?"selected":""}>Maybe billed to clients</option>${CATS.map(c=>`<option ${c===S.recFilter?"selected":""}>${esc(c)}</option>`).join("")}</select>
@@ -2072,7 +2103,7 @@ document.addEventListener("change",e=>{
 });
 function showAfterPick(sel){try{document.activeElement&&document.activeElement.blur()}catch{}const go=()=>{const el=document.querySelector(sel);if(el)el.scrollIntoView({block:"start"});else window.scrollTo({top:0})};requestAnimationFrame(go);setTimeout(go,350)}
 $("#camIn").addEventListener("change",e=>{const f=e.target.files&&e.target.files[0];e.target.value="";onReceiptFile(f);if(f)showAfterPick("#recDraftBox")});
-$("#libIn").addEventListener("change",e=>{const f=e.target.files&&e.target.files[0];e.target.value="";onReceiptFile(f);if(f)showAfterPick("#recDraftBox")});
+$("#libIn").addEventListener("change",e=>{const fs=[...(e.target.files||[])];e.target.value="";if(fs.length>1){onReceiptBatch(fs);showAfterPick("#batchBox")}else if(fs[0]){onReceiptFile(fs[0]);showAfterPick("#recDraftBox")}});
 $("#invIn").addEventListener("change",e=>{const f=e.target.files&&e.target.files[0];e.target.value="";onInvoiceFile(f)});
 $("#invCamIn").addEventListener("change",e=>{const f=e.target.files&&e.target.files[0];e.target.value="";onInvoiceFile(f)});
 $("#rcInvCam").addEventListener("change",e=>{const f=e.target.files&&e.target.files[0];e.target.value="";onInvReceiptFile(f);if(f)showAfterPick(".rcbox")});
@@ -2106,6 +2137,9 @@ document.addEventListener("click",async e=>{
   switch(a){
     case "tab":S.tab=v;S.invMail="";S.imgView=null;if(v!=="invoices")S.invViewId=null;render(true);window.scrollTo({top:0});break;
     case "year":S.year=Number(v);render(true);break;
+    case "batchStop":if(S.batch)S.batch.stop=true;toast("Stopping after this one.");break;
+    case "batchDone":S.batch=null;render(true);break;
+    case "batchBill":{const B=S.batch;const bt=(B&&B.billTo||"").trim();if(!B||!bt)break;let n=0;for(const id of B.ids){const r=S.receipts.find(x=>x.id===id);if(r&&!r.billedTo&&!isPersonal(r)){await save({...r,billLater:bt},true);n++}}toast(`${n} receipt${n===1?"":"s"} set to bill later to ${bt}.`);render(true);break}
     case "billNow":startBillLater(v);break;
     case "newInvoice":S.tab="invoices";S.invViewId=null;S.voice=null;S.vfix=null;S.invEdit=blankInvoice();S.gfind=null;S.invRc=null;S.picker=null;render(true);break;
     case "editInv":{const inv=S.invoices.find(i=>i.id===v);if(inv){S.invEdit=JSON.parse(JSON.stringify(inv));S.invEdit.items=S.invEdit.items.map(it=>({desc:it.desc,qty:"1",rate:String(num(it.qty||1)*num(it.rate)),taxable:it.taxable!==false,type:lineType(it),...(it.rid?{rid:it.rid}:{})}))}S.tab="invoices";S.gfind=null;S.invRc=null;S.picker=null;render(true);break}

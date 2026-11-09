@@ -150,6 +150,7 @@ button.card.on{border-color:var(--gold)}
 img.logo{object-fit:contain;max-height:200px}
 .holdbtn{position:relative;overflow:hidden;background:var(--red)!important;color:#fff!important;border:none!important;user-select:none;-webkit-user-select:none;touch-action:none;min-width:240px;justify-content:center}.holdbtn .holdfill{position:absolute;left:0;top:0;bottom:0;width:0;background:rgba(0,0,0,.35);transition:width .05s linear}.holdbtn .holdtxt{position:relative}
 .billlater{border:1px dashed var(--line);border-radius:8px;padding:8px 10px}.billlater.on{border-color:var(--gold);background:color-mix(in srgb,var(--gold) 8%,transparent)}.billlater input[type=text],.billlater #rd-billto{margin-top:6px}
+.bar{height:6px;background:var(--line);border-radius:4px;overflow:hidden}.bar span{display:block;height:100%;background:var(--gold);transition:width .3s}
 /* gmail card */
 .gmcard{border-left:4px solid var(--gold)}.gmrow{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap}.gmhead{font-weight:700;font-size:17px;margin-top:4px}.gmbtn{font-size:16px;padding:13px 22px}
 @media (max-width:520px){.gmbtn{width:100%;justify-content:center}}
@@ -328,7 +329,7 @@ a.lnk{color:var(--ice);font-size:12.5px;text-decoration:underline}
 
 <!-- Permanent file inputs (kept outside the re-rendered area so a pick is never lost) -->
 <input type="file" id="camIn" class="sr" accept="image/*" capture="environment" tabindex="-1" aria-hidden="true">
-<input type="file" id="libIn" class="sr" accept="image/*,application/pdf,.pdf" tabindex="-1" aria-hidden="true">
+<input type="file" id="libIn" class="sr" accept="image/*,application/pdf,.pdf" multiple tabindex="-1" aria-hidden="true">
 <input type="file" id="invCamIn" class="sr" accept="image/*" capture="environment" tabindex="-1" aria-hidden="true">
 <input type="file" id="invIn" class="sr" accept="image/*,application/pdf,.pdf" tabindex="-1" aria-hidden="true">
 <input type="file" id="rcInvCam" class="sr" accept="image/*" capture="environment" tabindex="-1" aria-hidden="true">
