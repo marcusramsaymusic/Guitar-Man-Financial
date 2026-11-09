@@ -1868,7 +1868,7 @@ async function onReceiptBatch(files){
       B.ids.push(rec.id)}
     catch(e){B.fail.push(`${files[i].name||"Photo "+(i+1)}: ${(e&&e.message)||"couldn't open it"}`)}
     B.done=i+1;batchDraw()}
-  B.running=false;const last=(B.billTo||"").trim();if(last)await batchApplyBill(B,last,true);
+  B.running=false;const last=(B.billTo||"").trim(),typing=document.activeElement&&document.activeElement.id==="batch-billto";if(last&&!typing)await batchApplyBill(B,last,true);
   batchDraw();render();
   toast(`${B.ids.length} receipt${B.ids.length===1?"":"s"} added${B.dups.length?`, ${B.dups.length} already there`:""}.`)}
 async function batchApplyBill(B,bt,quiet){B.billSet=bt;let n=0;for(const id of B.ids){const r=S.receipts.find(x=>x.id===id);if(r&&!r.billedTo&&!isPersonal(r)&&r.billLater!==bt){await save({...r,billLater:bt},true);n++}}if(!quiet&&n)toast(`${B.ids.length} receipt${B.ids.length===1?"":"s"} set to bill later to ${bt}.`);return n}
