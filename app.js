@@ -197,11 +197,11 @@ function taxSplit(total,prov,cat){const p=provOf(prov);if(!p)return null;let [co
   if(code==="BC"&&cat==="Meals & entertainment")ps=0;
   const rate=g+h+ps;const r2=x=>Math.round(x*100)/100;
   return{claim:t>0?r2(t*(g+h)/(100+rate)):0,other:t>0?r2(t*ps/(100+rate)):0,name,label:h?`HST ${h}%`:`GST ${g}%`,otherLabel:ps?`${otherLabel} ${ps}%`:"",exempt:false}}
-function taxEstLine(d){if(d.currency!=="CAD"||isPersonal(d))return "";if(String(d.taxPaid??"").trim()!=="")return `<span class="note">Using the tax shown on the receipt. Clear the box to estimate it from the province instead.</span>`;
-  if(!provOf(d.prov))return `<span class="note">No tax on the receipt? Pick the province it was bought in and the GST/HST is worked out for you.</span>`;
-  const e=taxSplit(d.total,d.prov,d.category);if(!num(d.total))return `<span class="note">Enter the total and the ${esc(e.label)} inside it is worked out for you.</span>`;
+function taxEstLine(d){if(d.currency!=="CAD"||isPersonal(d))return "";if(String(d.taxPaid??"").trim()!=="")return "";
+  if(!provOf(d.prov))return `<span class="note">Pick where it was bought to estimate the tax.</span>`;
+  const e=taxSplit(d.total,d.prov,d.category);if(!num(d.total))return "";
   if(e.exempt)return `<span class="note">Insurance has no GST/HST to claim.</span>`;
-  return `<span class="ok">Estimated: ${money(e.claim)} ${esc(e.label)} you can claim</span>${e.other?`<span class="note"> + ${money(e.other)} ${esc(e.otherLabel)} (not claimable, it stays part of the cost)</span>`:""}`}
+  return `<span class="ok">${esc(e.label)}: ${money(e.claim)} (estimated)</span>${e.other?`<span class="note"> + ${money(e.other)} ${esc(e.otherLabel)}, not claimable</span>`:""}`}
 function withTaxEst(rec,x){if(rec.currency!=="CAD")return rec;const pr=provOf(x&&x.province)?x.province:(S.settings.homeProv||"");if(pr)rec.prov=pr;
   if(x&&(x.tax===null||x.tax===undefined||x.tax==="")){const e=taxSplit(rec.total,pr,rec.category);if(e){rec.taxPaid=e.claim;rec.pstPaid=e.other;rec.taxEstimated=true}}else rec.taxEstimated=false;return rec}
 
@@ -295,7 +295,7 @@ async function syncGmail(auto){
     }
     await save({...S.settings,kind:"settings",id:"settings",gmailSyncedThrough:today()},true);
     S.sync.phase="done";
-    if(auto&&!S.sync.added){S.sync=null}else if(auto)toast(`Gmail checked: ${S.sync.added} new receipt${S.sync.added===1?"":"s"} added.`);
+    if(auto&&!S.sync.added){S.sync=null}else if(auto)toast(`${S.sync.added} new receipt${S.sync.added===1?"":"s"} from Gmail.`);
   }catch(e){
     S.sync.phase="error";
     S.sync.err=e&&e.code==="cancelled"?"Stopped. Anything already added stays.":(e&&e.code&&String(e.code).match(/not_granted|sampling|rate_limited|invalid_json|empty|refused|session/))?sampleErr(e.code):mcpErr(e,"Gmail");
@@ -389,30 +389,120 @@ async function onInvoiceFile(file){
 const docTitle=inv=>inv.status==="quote"?"QUOTE":"INVOICE";
 function taxLine(inv){const s=S.settings;return inv.taxType==="HST"?`HST(#${s.gstNumber})`:`${s.taxLabel||"hst/GST"}(#${s.gstNumber})`}
 function firstName(n){return String(n||"").split(/[\s\-]/)[0]||"there"}
-function signOff(){const n=String(S.settings.businessName||"").trim().split(/\s+/)[0];return n?"-"+n:"Thanks again"}
-function reminderBody(inv){const t=invTotals(inv);return `Hi ${firstName(inv.client)}!\n\nJust a friendly reminder about invoice #${inv.number} for ${inv.items[0]?.desc||"the work"} (${money(t.total,inv.currency)}), sent ${ddmmyy(inv.date)}. I've attached it again here. Let me know if you need anything from me.\n\nThanks!\n${signOff()}`}
-function defaultMailBody(inv){if(inv.status==="quote")return `Hi ${firstName(inv.client)}!\n\nHere's my quote for ${inv.items[0]?.desc||"the work"}. Let me know if it works for you!\n\n${signOff()}`;return `Hi ${firstName(inv.client)}!\n\nSending over the bill for ${inv.items[0]?.desc||"the work"}.${(inv.items||[]).some(it=>it.rid)?" Receipts for the expenses are attached too.":""} Thanks for having me!\n\n${signOff()}`}
 function pdfName(inv){return `${safeName(inv.client)} ${inv.status==="quote"?"quote ":""}${inv.number}.pdf`.replace(/\s+/g," ")}
 function printHTML(html){let pa=document.getElementById("printArea");if(!pa){pa=document.createElement("div");pa.id="printArea";document.body.appendChild(pa)}pa.innerHTML=html;setTimeout(()=>window.print(),80)}
 async function receiptsPrintHTML(inv){const list=rcsOf(inv);let out="";for(const [k,{r,it}] of list.entries()){const img=r.hasImage?await getImage(r.id):null;out+=`<div class="pgbrk pr-rc" style="font-family:Arial,sans-serif;color:#111;background:#fff;padding:10px"><h2 style="margin:0 0 4px">Receipt ${k+1} of ${list.length}: ${esc(r.vendor)}</h2><p style="margin:0 0 10px;color:#555">${esc(fmtDate(r.date,"mmm d, yyyy"))} · ${money(r.total,r.currency)} ${esc(r.currency||"CAD")}${num(r.taxPaid)?` · GST/HST ${money(r.taxPaid,r.currency)}`:""} · billed on “${esc(it.desc)}”</p>${img?`<img src="${img}" alt="">`:`<p>${esc(r.note||r.category)}</p>`}</div>`}return out}
 async function downloadInvoicePdf(inv){printHTML(sheetHTML(inv))}
-async function emailInvoice(inv){
-  if(!S.mcp){S.invMail="err:Connected apps aren't available in this view. Open the page in Claude.";render();return}
-  const to=[...new Set((String(inv.clientEmail||"").match(/[^@\s<>"',;]+@[^@\s<>"',;]+\.[a-z]{2,}/gi)||[]).map(x=>x.toLowerCase()))];
-  if(!to.length){S.invMail="err:Add the client's email address first (Edit).";render();return}
-  S.busy.mail=true;S.invMail="";render();
-  try{
-    const doc=await buildInvoicePdf(inv);const b64=doc.output("datauristring").split(",")[1];
-    const body=(S.mailBody??defaultMailBody(inv));
-    const atts=[{content:b64,filename:pdfName(inv),mimeType:"application/pdf"}];
-    let nrc=0;if(S.attachRc!==false&&rcCount(inv)){const {doc:rd,originals}=await buildReceiptsPdf(inv);if(rd){nrc=rcCount(inv);atts.push({content:rd.output("datauristring").split(",")[1],filename:`Receipts for ${pdfName(inv)}`,mimeType:"application/pdf"});atts.push(...originals)}}
-    await S.mcp.callTool("Gmail","create_draft",{to,subject:isOverdue(inv)?`Reminder: invoice #${inv.number}`:`${inv.items[0]?.desc?String(inv.items[0].desc).slice(0,60)+" ":""}${inv.status==="quote"?"quote":"invoice"}`.replace(/^"|"$/g,""),body,attachments:atts});
-    S.invMail=`ok:Draft with the invoice${nrc?` and ${nrc} receipt${nrc===1?"":"s"}`:""} attached is in your Gmail. Open Gmail, check it and press Send.`;
-    if(inv.status==="draft"){await save({...inv,status:"sent"});autoBackupInv(inv.id)}
-  }catch(e){S.invMail="err:"+(e&&e.message==="load"?"Couldn't load the PDF maker. Check your connection.":mcpErr(e,"Gmail"))}
-  S.busy.mail=false;render();
-}
+/* ———————————— the invoice email: short and casual ———————————— */
+function signOff(){return String(S.settings.emailSig||"").trim()}
+function greetName(inv){const m=String(inv.clientEmail||"").match(/^\s*"?([A-Za-zÀ-ÿ'’-]{2,})[^<"]*"?\s*</);if(m&&!/^(info|accounts?|billing|admin|office|hello|contact|payments?|ap)$/i.test(m[1]))return m[1];
+  const c=String(inv.client||"").trim();if(!c||/music|records|productions?|\binc\b|ltd|llc|band|entertainment|management|group|festival|fest\b|events?|agency|media|society|association|studios?|&|\bthe\b/i.test(c)||c.split(/\s+/).length>2)return "guys";return c.split(/\s+/)[0]}
+function mailTopic(inv){const clean=s=>String(s||"").replace(/\(.*?\)/g,"").replace(/\s*(?:[x×@]|\bat\b)\s*\$?\d.*$/i,"").replace(/\$\s*\d.*$/,"").replace(/\b\d+\s*(?:days?|shows?|gigs?|nights?|hours?|hrs?)\b.*$/i,"").replace(/[-–—:,/]+\s*$/,"").replace(/\s+/g," ").trim();
+  const pay=(inv.items||[]).find(it=>lineType(it)==="pay"&&String(it.desc||"").trim());return clean(inv.forLabel)||clean(pay&&pay.desc)||clean(inv.client)||"the work"}
+function reimbWords(inv){const w=[];const add=x=>{if(!w.includes(x))w.push(x)};
+  const kind=s=>/air canada|westjet|flair|porter|united|delta air|flight|airline/.test(s)?"flight":/park/.test(s)?"parking":/esso|shell|petro|chevron|husky|\bgas\b|fuel/.test(s)?"gas":/uber|lyft|taxi|\bcab\b/.test(s)?"cab":/rental|enterprise|budget|avis|hertz/.test(s)?"rental car":/hotel|inn\b|airbnb|marriott|hilton|booking\.com|motel|lodg/.test(s)?"hotel":"";
+  rcsOf(inv).forEach(({r,it})=>add(kind(`${r.vendor} ${it.desc}`.toLowerCase())||(/accommodation/i.test(r.category)?"":"")||"expense"));
+  (inv.items||[]).forEach(it=>{if(lineType(it)==="reimb"&&!it.rid){const k=kind(String(it.desc).toLowerCase());if(k)add(k)}});
+  return w.length>1?w.filter(x=>x!=="expense"):w}
+const andList=a=>a.length<2?a.join(""):a.slice(0,-1).join(", ")+" and "+a[a.length-1];
+const theTopic=t=>/\b(show|gig|session|sessions|event|fest|festival|tour|run|date|weekend|rehearsals?)$/i.test(t)&&!/^(the|my|our|last)\b/i.test(t)?"the "+t:t;
+function mailSubject(inv){return `${mailTopic(inv)} ${isOverdue(inv)?"invoice":inv.status==="quote"?"quote":"invoice"}`.replace(/^\w/,c=>c.toUpperCase())}
+function defaultMailBody(inv){const hi=`Hey ${greetName(inv)}!`,t=mailTopic(inv),so=signOff();
+  if(isOverdue(inv)&&inv.status==="sent")return reminderBody(inv);
+  if(inv.status==="quote")return `${hi}\n\nHere's my quote for ${t}. Let me know if it works!${so?"\n\n"+so:""}`;
+  const rw=reimbWords(inv);const what=rw.length?`my bill and ${andList(rw)} reimbursement${rw.length>1||rw[0]==="expense"?"s":""}`:"the bill";
+  return `${hi}\n\nSending over ${what} for ${theTopic(t)}. Thanks for having me!${so?"\n\n"+so:""}`}
+function reminderBody(inv){const t=invTotals(inv),so=signOff();return `Hey ${greetName(inv)}!\n\nJust following up on the ${mailTopic(inv).replace(/^the\s+/i,"")} invoice (#${inv.number}, ${money(t.total,inv.currency)}) from ${shortDate(inv.date)}. Attached it again. Let me know when I can expect it, thanks!${so?"\n\n"+so:""}`}
 
+/* ———————————— the Gmail draft keeps trying in the background ———————————— */
+const MAIL_WAIT=[0,15,30,60,120,180,300,300,600];
+const isFatal=e=>{const c=String(e&&e.code||""),m=String(e&&e.message||"");return /not_granted|server_not_connected|unauthori|forbidden|invalid/i.test(c)||/permission|not connected|invalid argument|too large|exceeds/i.test(m)};
+const withTimeout=(p,ms)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>rej({code:"timeout",message:"Gmail didn't answer in time"}),ms))]);
+async function buildMailArgs(inv){
+  const to=[...new Set((String(inv.clientEmail||"").match(/[^@\s<>"',;]+@[^@\s<>"',;]+\.[a-z]{2,}/gi)||[]).map(x=>x.toLowerCase()))];
+  const doc=await buildInvoicePdf(inv);const atts=[{content:doc.output("datauristring").split(",")[1],filename:pdfName(inv),mimeType:"application/pdf"}];
+  let nrc=0;if(S.attachRc!==false&&rcCount(inv)){const {doc:rd}=await buildReceiptsPdf(inv);if(rd){nrc=rcCount(inv);atts.push({content:rd.output("datauristring").split(",")[1],filename:`Receipts for ${pdfName(inv)}`,mimeType:"application/pdf"})}}
+  return{args:{to,subject:mailSubject(inv),body:S.mailFor===inv.id&&S.mailBody?S.mailBody:defaultMailBody(inv),attachments:atts,includeSignature:true},nrc}}
+async function draftAlreadyThere(j){try{const q=`to:${j.args.to[0]} subject:(${j.args.subject.replace(/[()"]/g," ")}) newer_than:2d`;const p=pl(await withTimeout(S.mcp.callTool("Gmail","list_drafts",{query:q,pageSize:5},{cache:false}),30000));return !!((p.drafts||[]).length)}catch{return false}}
+async function emailInvoice(inv){
+  if(!S.mcp){S.invMail="err:Gmail isn't available here. Open the app in Claude.";render();return}
+  const to=emailsIn(inv.clientEmail);if(!to.length){S.invMail="err:Add the client's email first.";render();return}
+  if(S.mailJob&&!S.mailJob.done){toast("Still working on the last draft.");return}
+  S.busy.mail=true;S.invMail="";render();
+  let built;try{built=await buildMailArgs(inv)}catch(e){S.busy.mail=false;S.invMail="err:"+(e&&e.message==="load"?"Couldn't load the PDF maker. Check your connection.":"Couldn't make the PDF.");render();return}
+  S.mailJob={invId:inv.id,args:built.args,nrc:built.nrc,attempt:0,state:"sending",done:false};
+  const cur=S.invoices.find(i=>i.id===inv.id);if(cur)save({...cur,mailPending:{at:Date.now(),to:built.args.to,subject:built.args.subject,body:built.args.body}},true);
+  runMailJob()}
+async function runMailJob(){const j=S.mailJob;if(!j||j.done||j.running)return;j.running=true;j.attempt++;
+  try{
+    if(j.attempt>1){j.state="checking";mailDraw();if(await draftAlreadyThere(j)){await mailDone(j);return}}
+    j.state="sending";mailDraw();
+    await withTimeout(S.mcp.callTool("Gmail","create_draft",j.args),120000);await mailDone(j)}
+  catch(e){j.running=false;j.err=(e&&e.message)||"Gmail didn't answer";
+    if(isFatal(e)||j.attempt>=MAIL_WAIT.length){j.done=true;j.state="failed";S.busy.mail=false;S.invMail="err:"+(isFatal(e)?mcpErr(e,"Gmail"):"Gmail still isn't answering. Check your Gmail drafts, then try again or save the files instead.");
+      const cur=S.invoices.find(i=>i.id===j.invId);if(cur&&cur.mailPending)save({...cur,mailPending:null},true);mailDraw();render();return}
+    j.state="waiting";j.next=Date.now()+MAIL_WAIT[j.attempt]*1000;mailDraw();clearTimeout(j.timer);j.timer=setTimeout(()=>{j.running=false;runMailJob()},MAIL_WAIT[j.attempt]*1000);return}
+  j.running=false}
+async function mailDone(j){j.done=true;j.running=false;j.state="done";S.busy.mail=false;
+  S.invMail=`ok:The draft${j.nrc?` with ${j.nrc} receipt${j.nrc===1?"":"s"}`:""} is in your Gmail drafts.`;
+  const cur=S.invoices.find(i=>i.id===j.invId);if(cur){const upd={...cur,mailPending:null};if(cur.status==="draft")upd.status="sent";await save(upd,true);if(cur.status==="draft")autoBackupInv(cur.id)}
+  toast(`Gmail draft ready: ${j.args.subject}`);mailDraw();render()}
+function mailDraw(){let el=$("#mailPill");const j=S.mailJob;
+  if(!j||j.state==="done"||j.state==="failed"){if(el)el.remove();return}
+  if(!el){el=document.createElement("div");el.id="mailPill";el.setAttribute("role","status");document.body.appendChild(el)}
+  const secs=j.next?Math.max(0,Math.round((j.next-Date.now())/1000)):0;
+  el.innerHTML=`<span class="spin"></span><span>${j.state==="waiting"?`Gmail's slow. Trying again in ${secs}s (try ${j.attempt+1})`:j.state==="checking"?"Checking your Gmail drafts…":j.attempt>1?`Sending to Gmail (try ${j.attempt})…`:"Sending to Gmail…"}</span>${j.state==="waiting"?`<button class="btn sm ghost" data-act="mailNow">Now</button>`:""}<button class="btn sm ghost" data-act="mailStop">Stop</button>`;
+  if(j.state==="waiting"){clearTimeout(j.tick);j.tick=setTimeout(mailDraw,1000)}}
+function resumeMailJobs(){if(S.mailJob||!S.mcp)return;const inv=S.invoices.find(i=>i.mailPending&&Date.now()-i.mailPending.at<36*3600e3);if(!inv)return;
+  S.mailFor=inv.id;S.mailBody=inv.mailPending.body||"";emailInvoice({...inv,clientEmail:(inv.mailPending.to||[]).join(", ")||inv.clientEmail})}
+
+/* ———————————— what a receipt looks like when it goes out: photo, the receipt PDF, or a crop of the email ———————————— */
+function mimeHeader(raw,name){const k=raw.search(/\r?\n\r?\n/);const head=(k<0?raw:raw.slice(0,k)).replace(/\r?\n[ \t]+/g," ");const m=head.match(new RegExp("^"+name+":\\s*(.*)$","im"));if(!m)return "";
+  return m[1].replace(/=\?([^?]+)\?([bq])\?([^?]*)\?=/gi,(_,cs,enc,txt)=>{try{const bin=enc.toLowerCase()==="b"?atob(txt):qpToBin(txt.replace(/_/g," "));return new TextDecoder(cs).decode(binToBytes(bin))}catch{return txt}}).replace(/\s+/g," ").trim()}
+function cleanEmailDom(html,W){const doc=new DOMParser().parseFromString(html,"text/html");
+  doc.querySelectorAll("script,iframe,object,embed,link,meta,base,form,video,audio").forEach(n=>n.remove());
+  doc.querySelectorAll("img").forEach(n=>{const s=n.getAttribute("src")||"";if(!/^data:image\//i.test(s)){const alt=n.getAttribute("alt");if(alt&&alt.length<40){const sp=doc.createElement("span");sp.textContent=alt;n.replaceWith(sp)}else n.remove()}});
+  doc.querySelectorAll("*").forEach(n=>{for(const a of [...n.attributes]){if(/^on/i.test(a.name))n.removeAttribute(a.name);else if(/url\(/i.test(a.value))n.setAttribute(a.name,a.value.replace(/url\([^)]*\)/gi,"none"))}});
+  doc.querySelectorAll("style").forEach(s=>{s.textContent=s.textContent.replace(/@import[^;]*;?/gi,"").replace(/url\([^)]*\)/gi,"none")});
+  const host=document.createElement("div");host.style.cssText=`position:fixed;left:-10000px;top:0;width:${W}px;background:#fff;color:#111;font:14px Arial,sans-serif`;
+  const inner=document.createElement("div");inner.setAttribute("xmlns","http://www.w3.org/1999/xhtml");inner.style.cssText=`width:${W}px;background:#fff;color:#111;font:14px Arial,sans-serif;padding:12px;box-sizing:border-box`;
+  doc.head.querySelectorAll("style").forEach(s=>inner.appendChild(s.cloneNode(true)));[...doc.body.childNodes].forEach(n=>inner.appendChild(document.importNode(n,true)));host.appendChild(inner);return{host,inner}}
+function keyBand(inner,fullH){const base=inner.getBoundingClientRect();const MONEY=/(?:\$|CA\$|US\$|CAD|USD)\s?\d|\b\d{1,5}[.,]\d{2}\b/,KEY=/total|amount|paid|charged|subtotal|gst|hst|tax|fare|fee|price|booking|reservation|confirmation|receipt|order|invoice|parking|entry|exit|arriv|depart|check.?in|check.?out|\blot\b|duration|vehicle|plate|date/i;
+  const hits=[];inner.querySelectorAll("td,th,p,li,span,div,h1,h2,h3,h4,strong,b,font").forEach(el=>{if(el.querySelector("table,div div,p p"))return;const t=(el.textContent||"").replace(/\s+/g," ").trim();if(!t||t.length>180)return;const money=MONEY.test(t),key=KEY.test(t)&&/\d/.test(t);if(!money&&!key)return;const rc=el.getBoundingClientRect();if(!rc.height||rc.height>fullH*.45)return;hits.push({top:rc.top-base.top,bot:rc.bottom-base.top,money})});
+  const m=hits.filter(h=>h.money);if(!m.length)return{top:0,bot:Math.min(fullH,900)};
+  m.sort((a,b)=>a.top-b.top);let best=null;for(let i=0;i<m.length;i++){let j=i;while(j+1<m.length&&m[j+1].top-m[j].bot<260)j++;const c={top:m[i].top,bot:m[j].bot,n:j-i+1};if(!best||c.n>best.n)best=c;i=j}
+  let top=best.top,bot=best.bot;hits.forEach(h=>{if(h.top>=top-200&&h.bot<=bot+160){top=Math.min(top,h.top);bot=Math.max(bot,h.bot)}});
+  top=Math.max(0,top-30);bot=Math.min(fullH,bot+30);if(bot-top<240){const pad=(240-(bot-top))/2;top=Math.max(0,top-pad);bot=Math.min(fullH,bot+pad)}if(bot-top>1300)bot=top+1300;return{top,bot}}
+function mailHeaderCanvas(meta,w,k){const c=document.createElement("canvas");const H=Math.round(78*k);c.width=w;c.height=H;const x=c.getContext("2d");x.fillStyle="#fff";x.fillRect(0,0,w,H);
+  x.fillStyle="#202124";x.font=`bold ${Math.round(17*k)}px Arial,Helvetica,sans-serif`;const fit=(s,max)=>{s=String(s||"");while(s&&x.measureText(s).width>max)s=s.slice(0,-2);return s};
+  x.fillText(fit(meta.subject||"Receipt",w-24*k),14*k,30*k);x.fillStyle="#5f6368";x.font=`${Math.round(13*k)}px Arial,Helvetica,sans-serif`;const d=meta.date?new Date(meta.date):null;const ds=d&&!isNaN(d)?d.toLocaleString("en-CA",{month:"short",day:"numeric",year:"numeric",hour:"numeric",minute:"2-digit"}):"";
+  const dw=ds?x.measureText(ds).width:0;x.fillText(fit(meta.from||"",w-dw-40*k),14*k,56*k);if(ds){x.fillText(ds,w-14*k-dw,56*k)}x.fillStyle="#e3e3e3";x.fillRect(0,H-1,w,1);return c}
+async function emailShot(html,meta){const W=640,k=1.6;const {host,inner}=cleanEmailDom(html,W);document.body.appendChild(host);
+  const fullH=Math.min(5000,Math.max(200,inner.scrollHeight));const band=keyBand(inner,fullH);const xhtml=new XMLSerializer().serializeToString(inner);host.remove();
+  const img=await loadImg("data:image/svg+xml;charset=utf-8,"+encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" width="${W}" height="${fullH}"><foreignObject width="100%" height="100%">${xhtml}</foreignObject></svg>`));
+  const hd=mailHeaderCanvas(meta||{},Math.round(W*k),k);const h=Math.round((band.bot-band.top)*k);const c=document.createElement("canvas");c.width=Math.round(W*k);c.height=hd.height+h;const x=c.getContext("2d");x.fillStyle="#fff";x.fillRect(0,0,c.width,c.height);x.drawImage(hd,0,0);
+  x.drawImage(img,0,band.top,W,band.bot-band.top,0,hd.height,c.width,h);return c}
+function textShot(text,meta){const W=640,k=1.6;const lines=String(text||"").split(/\r?\n/).map(l=>l.replace(/\s+$/,""));const MONEY=/(?:\$|CAD|USD)\s?\d|\b\d{1,5}[.,]\d{2}\b/;
+  let idx=lines.findIndex(l=>MONEY.test(l));if(idx<0)idx=0;const pick=lines.slice(Math.max(0,idx-8),idx+22).filter((l,i,a)=>l.trim()||a[i-1]&&a[i-1].trim());
+  const hd=mailHeaderCanvas(meta||{},Math.round(W*k),k);const lh=Math.round(19*k);const c=document.createElement("canvas");c.width=Math.round(W*k);c.height=hd.height+Math.round(24*k)+pick.length*lh;const x=c.getContext("2d");x.fillStyle="#fff";x.fillRect(0,0,c.width,c.height);x.drawImage(hd,0,0);
+  x.fillStyle="#222";x.font=`${Math.round(14*k)}px Arial,Helvetica,sans-serif`;pick.forEach((l,i)=>x.fillText(l.slice(0,90),16*k,hd.height+Math.round(26*k)+i*lh));return c}
+async function receiptVisual(r){S.rcVis=S.rcVis||{};if(S.rcVis[r.id]&&S.rcVis[r.id].v===r.updatedAt)return S.rcVis[r.id];let v={kind:"none",url:"",v:r.updatedAt};
+  if(r.hasImage){const u=await getImage(r.id);if(u)v={kind:"photo",url:u,v:r.updatedAt}}
+  if(!v.url&&r.gid&&S.mcp){try{const p=await emailParts(r.gid);const meta=p.meta||{subject:r.vendor,from:r.vendor,date:r.date};
+    if(p.pdfs.length){try{const c=await pdfToCanvas(new Blob([binToBytes(atob(p.pdfs[0].b64))],{type:"application/pdf"}));v={kind:"pdf",url:drawScaled(c,1500).toDataURL("image/jpeg",.85),pdfs:p.pdfs,v:r.updatedAt}}catch{}}
+    if(!v.url&&p.html){try{const c=await emailShot(p.html,meta);v={kind:"email",url:c.toDataURL("image/jpeg",.86),v:r.updatedAt}}catch{}}
+    if(!v.url&&p.text){const c=textShot(p.text,meta);v={kind:"email",url:c.toDataURL("image/jpeg",.86),v:r.updatedAt}}}catch{}}
+  if(!v.url&&r.emailText){const c=textShot(r.emailText,{subject:r.vendor,from:r.vendor,date:r.date});v={kind:"email",url:c.toDataURL("image/jpeg",.86),v:r.updatedAt}}
+  return S.rcVis[r.id]=v}
+
+/* ———————————— attachments preview in the Send section ———————————— */
+function attPreviewHTML(inv){const rcs=rcsOf(inv);const st=S.attPrev&&S.attPrev.id===inv.id?S.attPrev:null;
+  const tiles=[`<button class="att" data-act="readBack" data-v="${inv.id}"><span class="attpdf">Invoice<br>#${esc(inv.number)}</span><span class="attcap">${esc(pdfName(inv))}</span></button>`];
+  if(S.attachRc!==false)rcs.forEach(({r},k)=>{const v=st&&st.v[r.id];tiles.push(`<button class="att" data-act="attOpen" data-v="${r.id}" ${v&&v.url?"":"disabled"}>${v&&v.url?`<img src="${v.url}" alt="" class="${v.kind==="photo"?"":"doc"}">`:`<span class="attpdf">${v?"No copy":'<span class="spin"></span>'}</span>`}<span class="attcap">${k+1}. ${esc(r.vendor)} · ${money(r.total,r.currency)}</span></button>`)});
+  return `<div class="label" style="margin-top:12px">Attachments</div><div class="attrow">${tiles.join("")}</div>${rcs.length&&S.attachRc!==false?`<p class="note" style="margin:4px 0 0">${rcs.length} receipt${rcs.length===1?"":"s"} go in one PDF called “Receipts for ${esc(pdfName(inv))}”.</p>`:""}`}
+async function loadAttPreview(inv){if(S.attPrev&&S.attPrev.id===inv.id&&S.attPrev.sig===invSig(inv))return;const st=S.attPrev={id:inv.id,sig:invSig(inv),v:{}};
+  for(const {r} of rcsOf(inv)){if(S.attPrev!==st)return;try{st.v[r.id]=await receiptVisual(r)}catch{st.v[r.id]={kind:"none",url:""}}const box=$("#attBox");if(box&&S.invViewId===inv.id)box.innerHTML=attPreviewHTML(inv)}}
+function lightbox(url,cap){setTimeout(backDraw,0);let el=$("#lbRoot");if(!el){el=document.createElement("div");el.id="lbRoot";document.body.appendChild(el)}el.innerHTML=`<div class="lb" data-act="lbClose"><img src="${url}" alt=""><div class="lbcap">${esc(cap||"")} · tap to close</div></div>`}
 
 /* ———————————— send packet (Dropbox / downloads) ———————————— */
 async function pdfB64(doc){return doc.output("datauristring").split(",")[1]}
@@ -422,16 +512,14 @@ async function buildPacketHTML(inv){
   try{invB64=await pdfB64(await buildInvoicePdf(inv))}catch{}
   if(rcCount(inv)){try{const r=await buildReceiptsPdf(inv,{mode:S.rcMode||"best"});if(r.doc)rcB64=await pdfB64(r.doc);originals=r.originals}catch{}}
   const rc=[];for(const [k,{r,it}] of rcsOf(inv).entries()){
-    let inner="";
-    if(r.hasImage){const img=await getImage(r.id);if(img)inner=`<img src="${img}" alt="Receipt photo">`}
-    else if(r.gid&&S.mcp){try{const p=await emailParts(r.gid);if(p.html){const sn=await htmlSnapshot(p.html);inner=`<img src="${sn.c.toDataURL("image/jpeg",.72)}" alt="Copy of the emailed receipt">`}}catch{}}
+    let inner="";const vis=await receiptVisual(r);if(vis.url)inner=`<img src="${vis.url}" alt="">`;
     if(!inner)inner=`<p>${esc(r.vendor)} · ${esc(r.date)} · ${money(r.total,r.currency)} ${esc(r.currency||"CAD")}${r.note?" · "+esc(r.note):""}</p>`;
     rc.push(`<section class="rc"><h3>Receipt ${k+1}: ${esc(r.vendor)} · ${money(r.total,r.currency)}</h3><p class="sm">${esc(r.date)} · billed on line “${esc(it.desc)}”${r.url?` · <a href="${esc(r.url)}">original email</a>`:""}</p>${inner}</section>`);
   }
   const dl=(b64,name)=>b64?`<a class="dl" download="${esc(name)}" href="data:application/pdf;base64,${b64}">⬇ ${esc(name)}</a>`:"";
   let html=`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ready to send: ${esc(docTitle(inv))} ${esc(inv.number)} ${esc(inv.client)}</title><style>${SHEET_CSS}${TPL_CSS}
 .box{background:#fff;border-radius:6px;padding:16px;margin:14px 0;font:14px Arial,sans-serif;color:#222}.box pre{white-space:pre-wrap;font:14px Arial,sans-serif;background:#f6f6f6;padding:10px;border-radius:4px}.dl{display:inline-block;margin:4px 8px 4px 0;padding:8px 12px;background:#1f2a44;color:#fff;border-radius:4px;text-decoration:none;font:14px Arial}.rc img{max-width:100%;border:1px solid #ddd}.rc h3{margin:0 0 4px}.sm{color:#666;font-size:13px;margin:0 0 8px}</style></head><body><div class="wrapx">
-<div class="box"><b>Ready to send</b> · saved by Guitar Man Finance on ${today()}<br>To: ${esc(to||"(add the client's email)")}<br>Subject: ${esc(`${inv.items[0]?.desc?String(inv.items[0].desc).slice(0,60)+" ":""}${inv.status==="quote"?"quote":"invoice"}`)}<pre>${esc(body)}</pre>
+<div class="box"><b>Ready to send</b> · saved by Guitar Man Finance on ${today()}<br>To: ${esc(to||"(add the client's email)")}<br>Subject: ${esc(mailSubject(inv))}<pre>${esc(body)}</pre>
 <div>${dl(invB64,pdfName(inv))}${dl(rcB64,`Receipts for ${pdfName(inv)}`)}${originals.map(o=>dl(o.content,o.filename)).join("")}</div>
 <p class="sm">Tap a button to save that PDF, then attach them to an email to ${esc(inv.client)}.</p></div>
 ${sheetHTML(inv)}
@@ -472,13 +560,13 @@ async function receiptSummaryPdf(r,name){
 function receiptEntry(r){const base=`${r.date} ${fileBase(r.vendor)} receipt`;
   return{label:`${r.vendor} · ${money(r.total,r.currency)}`,make:async()=>{
     if(r.hasImage){const u=await getImage(r.id);const b=dataUrlBlob(u);if(b)return[{blob:b,name:`${base}.${imgExt(b.type)}`}]}
-    if(r.gid&&S.mcp){let p=null;try{p=await emailParts(r.gid)}catch{}
-      if(p&&p.pdfs.length)return p.pdfs.map((x,n)=>({blob:new Blob([binToBytes(atob(x.b64))],{type:"application/pdf"}),name:`${base}${p.pdfs.length>1?" "+(n+1):""}.pdf`}));
-      if(p&&p.html){try{const s=await htmlSnapshot(p.html);return[{blob:await canvasBlob(s.c,"image/jpeg",.86),name:`${base}.jpg`}]}catch{}}}
+    const v=await receiptVisual(r);
+    if(v.kind==="pdf"&&v.pdfs)return v.pdfs.map((x,n)=>({blob:new Blob([binToBytes(atob(x.b64))],{type:"application/pdf"}),name:`${base}${v.pdfs.length>1?" "+(n+1):""}.pdf`}));
+    if(v.url){const b=dataUrlBlob(v.url);if(b)return[{blob:b,name:`${base}.${imgExt(b.type)}`}]}
     return[await receiptSummaryPdf(r,`${base}.pdf`)]}}}
 function invoiceEntries(inv){return[{label:`${inv.status==="quote"?"Quote":"Invoice"} #${inv.number} (PDF)`,make:async()=>[{blob:(await buildInvoicePdf(inv)).output("blob"),name:invFileName(inv)}]},...rcsOf(inv).map(({r})=>receiptEntry(r))]}
 const saveWord=()=>dropboxOn()?"Save to Dropbox":"Save files";
-function startSave(title,entries){if(!S.downloads){toast("Saving files isn't available in this view. Open the page in the Claude app.");return}
+function startSave(title,entries){if(!S.downloads){toast("Saving files only works in the Claude app.");return}
   if(S.saveQ&&S.saveQ.busy)return;S.saveQ={title,items:entries.map(e=>({...e,status:"wait",files:null,fi:0,err:""})),i:0,busy:false,stopped:false};
   let el=$("#sqRoot");if(!el){el=document.createElement("div");el.id="sqRoot";document.body.appendChild(el)}runSave()}
 async function runSave(){const q=S.saveQ;if(!q||q.busy)return;q.busy=true;q.stopped=false;q.note="";sqDraw();
@@ -497,7 +585,7 @@ function sqDraw(){const el=$("#sqRoot"),q=S.saveQ;if(!el)return;if(!q){el.innerH
   const done=q.i>=q.items.length,nSaved=q.items.filter(x=>x.status==="saved").length;
   const ic={wait:"○",making:'<span class="spin"></span>',saving:'<span class="spin"></span>',saved:"✓",err:"!"};
   el.innerHTML=`<div class="saveq" role="dialog" aria-label="${esc(saveWord())}"><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><b>${esc(saveWord())} · ${esc(q.title)}</b>${q.busy?"":`<button class="btn sm ghost" data-act="sqClose">${done?"Done":"Close"}</button>`}</div>
-<p class="note" style="margin:6px 0 8px">${done?`${nSaved} of ${q.items.length} saved.`:dropboxOn()?"Your share menu opens for each file. Tap <b>Dropbox</b> (or <b>Save to Files › Dropbox</b>) and pick the folder.":"Your share menu opens for each file. Choose where it goes."}</p>
+<p class="note" style="margin:6px 0 8px">${done?`${nSaved} of ${q.items.length} saved.`:dropboxOn()?"Pick Dropbox in the share menu for each file.":"Pick where each file goes."}</p>
 <ul class="sqlist">${q.items.map((x,k)=>`<li class="sq-${x.status}"><span class="sqi">${ic[x.status]||"○"}</span><span>${esc(x.label)}${x.files&&x.files.length>1?` <span class="dim">(${x.files.length} files)</span>`:""}${x.err?` <span class="err">${esc(x.err)}</span>`:""}</span></li>`).join("")}</ul>
 ${q.note?`<p class="note" style="margin:8px 0 0">${esc(q.note)}</p>`:""}
 ${!q.busy&&!done?`<div class="row" style="margin-top:10px"><button class="btn sm gold" data-act="sqNext">Save next</button><button class="btn sm ghost" data-act="sqSkip">Skip this one</button></div>`:""}</div>`}
@@ -522,7 +610,7 @@ ${(()=>{const es=S.incomes.filter(e=>yearOf(e.date)===S.year).sort((a,b)=>(b.dat
 function streamsSettings(){
   const ss=S.settings.streams||[];const nf=S.newStream||{name:"",type:"business"};
   return `<details class="panel" style="max-width:640px" ${S.streamsOpen?"open":""} data-streams="1"><summary class="label" style="cursor:pointer">More: other income streams</summary>
-<p class="note" style="margin:10px 0">Music isn't your only income? Add a day job, rental income or a second business. You get an Other income tab, and it all counts in your tax estimate.</p>
+<p class="note" style="margin:10px 0">Day job, rental or a second business. Counts in your tax estimate.</p>
 ${ss.length?`<div class="list" style="margin-bottom:10px">${ss.map(x=>{const arm=S.armed==="stream:"+x.id;return `<div class="rowline"><span>${esc(x.name)} <span class="dim">· ${esc(streamTypeLabel(x.type))}</span></span><button class="btn sm ${arm?"armed":"danger"}" data-act="streamDel" data-v="${x.id}">${arm?"Tap again to remove":"Remove"}</button></div>`}).join("")}</div>`:""}
 <div class="grid3"><div class="field"><label class="label" for="ns-name">Name</label><input id="ns-name" data-bind="newStream.name" value="${esc(nf.name)}" placeholder="e.g. Teaching, Day job, Basement suite"></div>
 <div class="field"><label class="label" for="ns-type">Type</label><select id="ns-type" data-bind="newStream.type">${STREAM_TYPES.map(([k,l])=>`<option value="${k}" ${nf.type===k?"selected":""}>${l}</option>`).join("")}</select></div>
@@ -550,7 +638,7 @@ function eraseSection(){
   return `<details class="erase" ${S.eraseOpen?"open":""} data-erase="1" style="margin-top:16px"><summary class="note" style="cursor:pointer">Advanced: erase everything</summary>
 <div class="panel" style="margin-top:10px;border-color:var(--red)">
 ${e.step<2?`<p style="margin:0 0 8px"><b>Erase all of your books from ${OFFLINE?"this device":"this app"}.</b> Invoices, receipts, photos, mileage, income and settings are all deleted, and it can't be undone.</p>
-<p class="note" style="margin:0 0 10px">Tip: tap <b>Download a backup file</b> above first, just in case.</p>
+<p class="note" style="margin:0 0 10px">Download a backup file first.</p>
 <div class="field"><label class="label" for="erase-word">Step 1 of 2: type ERASE to continue</label><input id="erase-word" data-bind="erase.word" value="${esc(e.word||"")}" autocomplete="off" autocapitalize="characters" spellcheck="false" placeholder="ERASE"></div>
 <div class="row" style="margin-top:10px"><button class="btn sm danger" data-act="eraseNext">Continue</button></div>${e.err?`<div class="err" style="margin-top:6px">${esc(e.err)}</div>`:""}`
 :`<p style="margin:0 0 8px"><b>Step 2 of 2: last chance.</b> Press and hold the red button for 3 seconds to erase everything. Let go to cancel.</p>
@@ -689,10 +777,10 @@ function fmtDate(d,f){const m=String(d||"").match(/^(\d{4})-(\d{2})-(\d{2})/);if
   return f==="yyyy-mm-dd"?`${y}-${mo}-${da}`:f==="mmm d, yyyy"?`${MON[+mo-1]} ${+da}, ${y}`:f==="mm/dd/yyyy"?`${mo}/${da}/${y}`:`${da}/${mo}/${y.slice(2)}`}
 function fillTpl(str){const s=S.settings;return String(str||"").replace(/\{name\}/g,s.businessName||"").replace(/\{tagline\}/g,s.tagline||"").replace(/\{phone\}/g,s.phone||"").replace(/\{email\}/g,s.email||"").replace(/\{gst\}/g,s.gstNumber||"").replace(/\{address\}/g,String(s.address||"").replace(/\n/g,", ")).replace(/\s+[–-]\s*$/,"")}
 const richHTML=line=>esc(line).split("**").map((p,i)=>i%2?`<b>${p}</b>`:p).join("");
-const TPL_CSS=`.sheet{--acc:#111}.sheet tbody tr.it td{padding:9px 7px;border-bottom:1px solid #c8c8c8;line-height:1.4}.sheet tbody tr.it td:first-child{overflow-wrap:anywhere;word-break:break-word;padding-right:14px}.sheet.tb-minimal tbody tr.it td{border-bottom-color:#eee}.sheet .lg{display:block;max-height:58px;max-width:190px;margin-bottom:8px}
+const TPL_CSS=`.sheet{--acc:#111}.sheet tbody tr.it td{padding:7px 7px;border-bottom:none;line-height:1.4}.sheet tbody tr.it td:first-child{overflow-wrap:anywhere;word-break:break-word;padding-right:14px}.sheet.tb-minimal tbody tr.it td{border-bottom-color:#eee}.sheet .lg{display:block;max-height:58px;max-width:190px;margin-bottom:8px}
 .sheet.t-centered .top{flex-direction:column;align-items:center;text-align:center;gap:6px}.sheet.t-centered .inv{font-size:20px;letter-spacing:2px}
 .sheet.t-banner{padding-top:0}.sheet.t-banner .top{background:var(--acc);color:#fff;margin:0 -26px;padding:22px 26px;align-items:center}.sheet.t-banner .top .nm,.sheet.t-banner .top .inv{color:#fff!important}.sheet.t-banner .meta{margin-top:16px}
-.sheet.tb-lines th{border:none;border-bottom:2px solid var(--acc)}.sheet.tb-lines td{border:none;border-bottom:1px solid #ddd}.sheet.tb-lines tr.fill td{height:40px;border-bottom:1px solid #ddd}.sheet.tb-lines tr.tax td,.sheet.tb-lines tr.tot td{border:none}.sheet.tb-lines tr.tot td{border-top:2px solid var(--acc)}
+.sheet.tb-lines th{border:none;border-bottom:2px solid var(--acc)}.sheet.tb-lines td{border:none}.sheet.tb-lines tr.fill td{height:40px;border-bottom:1px solid #ddd}.sheet.tb-lines tr.tax td,.sheet.tb-lines tr.tot td{border:none}.sheet.tb-lines tr.tot td{border-top:2px solid var(--acc)}
 .sheet.tb-minimal th{border:none;color:var(--acc);text-align:left!important;font-size:11px;letter-spacing:1px}.sheet.tb-minimal th:last-child{text-align:right!important}.sheet.tb-minimal td{border:none}.sheet.tb-minimal tr.fill td{height:30px}.sheet.tb-minimal tr.tax td,.sheet.tb-minimal tr.tot td{border:none}.sheet.tb-minimal tr.tot td{border-top:1px solid #999}
 @media (max-width:520px){.sheet.t-banner .top{margin:0 -14px;padding:18px 14px}}`;
 document.head.insertAdjacentHTML("beforeend",`<style>${TPL_CSS}</style>`);
@@ -755,7 +843,6 @@ async function buildInvoicePdf(inv,tplOverride){
     doc.setFontSize(9.5);const lines=doc.splitTextToSize(String(it.desc||"").replace(/\s+/g," "),ac-L-18);const h=lines.length*12+12;
     if(ry+h>LIM){sides(segTop,ry);if(T.table==="boxed")doc.line(L,ry,R,ry);doc.addPage();firstPage=false;ry=50;head(ry);ry+=16;segTop=ry}
     lines.forEach((l,n)=>doc.text(l,L+7,ry+15+n*12));doc.text(plain(num(it.qty||1)*num(it.rate)),R-7,ry+15,{align:"right"});ry+=h;
-    if(k<inv.items.length-1){doc.setDrawColor(T.table==="minimal"?232:200);doc.line(L,ry,T.table==="boxed"?R:R,ry);doc.setDrawColor(0)}
   });
   const bodyBot=firstPage?Math.max(ry+10,Math.min(556,ry+120)):ry+10;
   sides(segTop,bodyBot);if(T.table==="boxed")doc.line(L,bodyBot,R,bodyBot);
@@ -830,7 +917,7 @@ function vCustomize(){
   const sel=(k,opts)=>`<select data-bind="tplDraft.${k}" data-tplrr="1">${opts.map(([v,l])=>`<option value="${v}" ${d[k]===v?"selected":""}>${l}</option>`).join("")}</select>`;
   return `<details class="panel" style="max-width:720px" ${S.custOpen?"open":""} data-cust="1"><summary class="label" style="cursor:pointer">Customize look: invoice template &amp; logo</summary>
 <div style="margin-top:14px"><span class="plaque" style="cursor:default">Invoice template</span>
-<p class="note" style="margin:8px 0 10px">Adjust how your invoices look: layout, colours, font, wording and footer.</p>
+<p class="note" style="margin:8px 0 10px">Layout, colours, font, wording and footer.</p>
 <div class="row">${d?"":`<button class="btn sm ghost" data-act="tplEdit">Adjust current template</button>`}${s.tpl?`<button class="btn sm ${S.armed==="tplReset"?"armed":"ghost"}" data-act="tplReset">${S.armed==="tplReset"?"Tap again to go back to the original":"Back to the standard template"}</button>`:""}</div>
 ${S.tplMsg?msgLine(S.tplMsg):""}
 ${d?`<div class="grid3" style="margin-top:12px">
@@ -937,7 +1024,8 @@ function renderChrome(){
   const tabs=[["dashboard","Dashboard"],["invoices","Invoices"],["receipts","Receipts"],["mileage","Mileage"],["gst","GST / HST"],...((S.settings.streams||[]).length?[["other","Other income"]]:[]),["reports","Reports"],["settings","Settings"]];
   $("#tabs").innerHTML=tabs.map(([k,l])=>`<button class="plaque ${S.tab===k?"":"off"}" data-act="tab" data-v="${k}" aria-current="${S.tab===k}">${l}</button>`).join("");
 }
-function render(force){renderChrome();if(!force&&editingNow())return;$("#view").innerHTML=({dashboard:vDash,invoices:vInvoices,receipts:vReceipts,mileage:vMileage,gst:vGst,other:vOther,reports:vReports,settings:vSettings}[S.tab]||vDash)()+(S.tab==="dashboard"&&themeNow()==="acdc"?setlist():"");acdcize($("#view"))}
+let mailResumed=false;
+function render(force){setTimeout(backDraw,0);if(!mailResumed&&S.mcp&&S.invoices.length){mailResumed=true;setTimeout(resumeMailJobs,2500)}renderChrome();if(!force&&editingNow())return;$("#view").innerHTML=({dashboard:vDash,invoices:vInvoices,receipts:vReceipts,mileage:vMileage,gst:vGst,other:vOther,reports:vReports,settings:vSettings}[S.tab]||vDash)()+(S.tab==="dashboard"&&themeNow()==="acdc"?setlist():"");acdcize($("#view"))}
 function msgLine(m){if(!m)return"";const [k,...r]=m.split(":");return `<div class="${k==="ok"?"ok":"err"}">${esc(r.join(":"))}</div>`}
 function years(){const ys=new Set([new Date().getFullYear()]);S.invoices.forEach(i=>ys.add(yearOf(i.date)));S.receipts.forEach(r=>ys.add(yearOf(r.date)));return[...ys].sort((a,b)=>b-a)}
 function yearPicker(){return `<div class="row" role="group" aria-label="Year">${years().map(y=>`<button class="btn sm ${y===S.year?"gold":"ghost"}" data-act="year" data-v="${y}">${y}</button>`).join("")}</div>`}
@@ -945,7 +1033,7 @@ function captureButtons(){return `<label tabindex="0" role="button" class="btn g
 
 function syncButton(){if(!gmailOn())return "";const sy=S.sync,busy=sy&&(sy.phase==="search"||sy.phase==="read");return `<button class="btn gold" data-act="sync" ${busy?"disabled":""}>${busy?'<span class="spin"></span> Syncing Gmail…':ICON.mail+"Sync Gmail"}</button>`}
 function gmailCard(){if(!gmailOn())return "";const sy=S.sync,busy=sy&&(sy.phase==="search"||sy.phase==="read");const last=S.settings.gmailSyncedThrough;
-  return `<section class="panel gmcard"><div class="gmrow"><div style="min-width:0"><div class="label">Gmail receipts</div><div class="gmhead">${busy?"Syncing your Gmail…":last?`Last synced ${esc(fmtDate(String(last).replace(/\//g,"-"),"mmm d, yyyy"))}`:"Not synced yet"}</div><p class="note" style="margin:4px 0 0">Pulls in new receipts and bookings from your email.</p></div><button class="btn gold gmbtn" data-act="sync" ${busy?"disabled":""}>${busy?'<span class="spin"></span> Syncing…':ICON.mail+"Sync Gmail"}</button></div>${sy?`<div style="margin-top:10px">${syncPanel()}</div>`:""}</section>`}
+  return `<section class="panel gmcard"><div class="gmrow"><div style="min-width:0"><div class="label">Gmail receipts</div><div class="gmhead">${busy?"Syncing your Gmail…":last?`Last synced ${esc(fmtDate(String(last).replace(/\//g,"-"),"mmm d, yyyy"))}`:"Not synced yet"}</div></div><button class="btn gold gmbtn" data-act="sync" ${busy?"disabled":""}>${busy?'<span class="spin"></span> Syncing…':ICON.mail+"Sync Gmail"}</button></div>${sy?`<div style="margin-top:10px">${syncPanel()}</div>`:""}</section>`}
 function syncPanel(){
   if(!gmailOn())return "";const sy=S.sync;if(!sy)return S.settings.gmailSyncedThrough?`<p class="note">Gmail last synced ${esc(S.settings.gmailSyncedThrough)}. Tap Sync Gmail to pull in newer receipts.</p>`:"";
   return `<div class="panel ${sy.phase==="error"?"":"hot"}">${sy.phase==="search"?'<span class="spin"></span> Searching Gmail since '+esc(S.settings.gmailSyncedThrough||"January 1")+"…":sy.phase==="read"?`<span class="spin"></span> Reading ${sy.done} of ${sy.found} emails · ${sy.added} receipts added<div class="progress"><i style="width:${sy.found?Math.round(sy.done/sy.found*100):0}%"></i></div>`:sy.phase==="done"?`<div class="ok">Gmail synced: ${sy.added} new receipt${sy.added===1?"":"s"} added${sy.found?` from ${sy.found} emails`:""}.${sy.added?" They're marked Check for a quick review.":""}</div>`:`<div class="err">${esc(sy.err)}</div>`}
@@ -970,21 +1058,21 @@ function drillView(st){
   return `<section class="panel hot"><div class="row" style="justify-content:space-between"><div class="label">${title}</div><button class="btn sm ghost" data-act="drill" data-v="${k}">Close</button></div><div style="margin-top:8px">${body||'<div class="note">Nothing here for '+S.year+" yet.</div>"}</div></section>`;
 }
 function welcomePanel(){if(S.settings.businessName)return "";return `<section class="panel hot"><span class="plaque" style="cursor:default">Welcome</span>
-<p style="margin:10px 0 6px">Let's set up your books. It takes a minute:</p>
-<ol class="note" style="margin:0 0 12px 18px;padding:0;line-height:1.7"><li>Add your name, address, email and GST/HST number.</li><li>Optional: adjust how your invoices look (Settings › Customize look).</li><li>Pick a theme you like: Thin Lizzy, AC/DC or Apple.</li><li>Everything stays on this device. To keep a safe copy, connect your own Google Drive or Dropbox in Settings › Privacy, or download a backup file now and then.</li></ol>
+<p style="margin:10px 0 6px">To get going:</p>
+<ol class="note" style="margin:0 0 12px 18px;padding:0;line-height:1.7"><li>Your name, address, email and GST/HST number</li><li>How your invoices look (Settings › Customize look)</li><li>Everything stays on this device. To keep a safe copy, connect your own Google Drive or Dropbox in Settings › Privacy, or download a backup file now and then.</li></ol>
 <div class="row"><button class="btn gold" data-act="tab" data-v="settings">Set up my details</button></div></section>`}
 function vDash(){
   const st=yearStats(S.year);if(!S.settings.businessName&&!S.invoices.length&&!S.receipts.length)return homeBackupCard()+welcomePanel()+vDash0(st);return homeBackupCard()+welcomePanel()+vDash0(st)}
 function vDash0(st){
   if(!S.invoices.length&&!S.receipts.length&&S.booted){
     return `<section class="panel empty"><div class="label">Your books for ${S.year}</div><h2>Nothing on the books yet</h2>
-<p class="note" style="max-width:60ch">Snap a receipt or pull them in from Gmail. Create invoices on your own template and send them through Gmail.</p>
+<p class="note" style="max-width:60ch">No invoices or receipts yet.</p>
 <div class="row">${captureButtons()}${syncButton()}<button class="btn" data-act="newInvoice">${ICON.pen}New invoice</button></div></section>${gmailCard()}`;
   }
   const goal=num(S.settings.incomeGoal),pct=goal?Math.min(100,Math.round(st.payB/goal*100)):0;
   const over=st.inv.filter(isOverdue);
   const recent=[...st.inv.filter(i=>i.status!=="quote").map(i=>({d:i.date,t:`Invoice ${i.number} · ${i.client||"no client"}`,v:invTotals(i).total,c:i.currency||"CAD",pos:true,act:"openInv",id:i.id})),...st.rec.map(r=>({d:r.date,t:`${r.vendor} · ${r.category}`,v:num(r.total),c:r.currency||"CAD",pos:false,act:"editRec",id:r.id}))].sort((a,b)=>(b.d||"").localeCompare(a.d||"")).slice(0,8);
-  return `${gmailCard()}${billLaterPanel()}<div class="row">${yearPicker()}</div>
+  return `${reviewBanners()}${gmailCard()}${billLaterPanel()}<div class="row">${yearPicker()}</div>
 <div class="row">
   <button class="btn sm" data-act="pdf" ${S.busy.pdf?"disabled":""}>${S.busy.pdf?'<span class="spin"></span> Building PDF…':"Print year-end report"}</button>
   ${dropboxOn()?`<button class="btn sm" data-act="ledger" ${S.busy.ledger?"disabled":""}>${S.busy.ledger?'<span class="spin"></span> Backing up…':"Back up books to Dropbox"}</button>`:""}
@@ -1025,7 +1113,7 @@ ${S.tripErr?`<div class="err">${esc(S.tripErr)}</div>`:""}</section>
 <div class="grid3"><div class="field"><label class="label" for="odo-s">Odometer Jan 1</label><input id="odo-s" class="mono" inputmode="numeric" data-odo="start" value="${esc(o.start??"")}"></div>
 <div class="field"><label class="label" for="odo-e">Odometer Dec 31 (or today)</label><input id="odo-e" class="mono" inputmode="numeric" data-odo="end" value="${esc(o.end??"")}"></div>
 <div class="field"><label class="label" for="veh-man">Or business use % directly</label><input id="veh-man" class="mono" inputmode="decimal" data-vehpct="1" value="${esc(S.settings.vehPctManual??"")}" placeholder="e.g. 60"></div></div></section>
-${list.length?`<div class="list">${list.map(x=>{const arm=S.armed==="trip:"+x.id;return `<div class="panel item"><span class="mono dim" style="font-size:12.5px;min-width:86px">${esc(x.date)}</span><span class="grow">${esc(x.from)} → ${esc(x.to)}${x.round?' <span class="dim">(return)</span>':""}${x.purpose?`<br><span class="dim" style="font-size:12.5px">${esc(x.purpose)}</span>`:""}</span><span class="mono">${plain(x.km)} km</span><button class="btn sm ${arm?"armed":"danger"}" data-act="delTrip" data-v="${x.id}" aria-label="Delete trip">${arm?"Tap again":"×"}</button></div>`}).join("")}</div>`:`<div class="panel empty"><h2>No trips yet</h2><p class="note">Log drives to gigs, sessions, rehearsals and the airport. Saved routes appear as one-tap buttons.</p></div>`}`;
+${list.length?`<div class="list">${list.map(x=>{const arm=S.armed==="trip:"+x.id;return `<div class="panel item"><span class="mono dim" style="font-size:12.5px;min-width:86px">${esc(x.date)}</span><span class="grow">${esc(x.from)} → ${esc(x.to)}${x.round?' <span class="dim">(return)</span>':""}${x.purpose?`<br><span class="dim" style="font-size:12.5px">${esc(x.purpose)}</span>`:""}</span><span class="mono">${plain(x.km)} km</span><button class="btn sm ${arm?"armed":"danger"}" data-act="delTrip" data-v="${x.id}" aria-label="Delete trip">${arm?"Tap again":"×"}</button></div>`}).join("")}</div>`:`<div class="panel empty"><h2>No trips yet</h2><p class="note">Drives to gigs, sessions and the airport.</p></div>`}`;
 }
 
 /* reports */
@@ -1064,11 +1152,12 @@ ${key==="CUSTOM"&&!disabled?`<input id="${scope}-rate" style="width:84px" inputm
 }
 function vInvoices(){
   if(S.invEdit)return vInvEdit();
+  if(S.review){const ri=S.invoices.find(i=>i.id===S.review.id);if(ri)return vReview(ri);S.review=null}
   if(S.invViewId){const inv=S.invoices.find(i=>i.id===S.invViewId);if(inv)return vInvView(inv);S.invViewId=null}
   const imp=S.invImport;
   const list=[...S.invoices].filter(i=>yearOf(i.date)===S.year).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
   const out=list.filter(i=>i.status==="sent");
-  return `${S.voice?voicePanel():""}${billLaterPanel()}<div class="row"><button class="btn gold" data-act="newInvoice">${ICON.pen}New invoice</button>
+  return `${S.voice?voicePanel():""}${reviewBanners()}${billLaterPanel()}<div class="row"><button class="btn gold" data-act="newInvoice">${ICON.pen}New invoice</button>
 </div>
 ${imp?`<div class="panel ${imp.status==="error"?"":"hot"}">${imp.status==="error"?`<div class="err">${esc(imp.err)}</div><div class="row" style="margin-top:10px"><button class="btn sm ghost" data-act="clearImport">Dismiss</button></div>`:`<span class="spin"></span> ${imp.status==="reading"?"Reading the invoice. This can take up to a minute.":"Opening the file…"}`}</div>`:""}
 <div class="row">${yearPicker()}<span class="note">${list.length} invoices · ${out.length} waiting on payment</span></div>
@@ -1077,9 +1166,9 @@ ${list.length?(()=>{const st=yearStats(S.year);return `<div class="panel splitli
 ${list.length?`<div class="list">${list.map(inv=>{const t=invTotals(inv);const col=inv.status==="paid"?"green":inv.status==="sent"?"goldc":inv.status==="quote"?"ice":"dim";return `<div class="panel item">
 <span class="mono dim" style="font-size:12.5px;min-width:86px">${esc(inv.date)}</span><span class="mono" style="font-size:13px">#${esc(inv.number)}</span>
 <span class="grow">${esc(inv.client)||'<i class="dim">no client</i>'}<br><span class="dim" style="font-size:12.5px">${esc((inv.items[0]||{}).desc||"").slice(0,70)}</span>${t.perdiem||t.reimb?`<br><span class="dim" style="font-size:12.5px">Pay ${money(t.pay,inv.currency)} · Reimb. ${money(t.reimb+t.perdiem,inv.currency)}</span>`:""}</span>${!isCAD(inv)?`<span class="chip goldc">${esc(inv.currency)}</span>`:""}
-<span class="chip ${col}">${esc(inv.status)}</span>${isOverdue(inv)?`<span class="chip red">${daysOut(inv)} days</span>`:""}<span class="mono" style="font-weight:600">${money(t.total,inv.currency)}</span>
+<span class="chip ${col}">${esc(inv.status)}</span>${inv.checkNotes?'<span class="chip ice">Check</span>':""}${isOverdue(inv)?`<span class="chip red">${daysOut(inv)} days</span>`:""}<span class="mono" style="font-weight:600">${money(t.total,inv.currency)}</span>
 <button class="btn sm ghost" data-act="openInv" data-v="${inv.id}">Open</button></div>`}).join("")}</div>`
-:`<div class="panel empty"><h2>No invoices for ${S.year}</h2><p class="note">Create one on your template, or import a past invoice from a photo or PDF.</p></div>`}`;
+:`<div class="panel empty"><h2>No invoices for ${S.year}</h2><p class="note">No invoices yet.</p></div>`}`;
 }
 function pickerCands(v){
   const d0=Date.parse((v.date||today())+"T12:00:00");const used=new Set(v.items.map(it=>it.rid).filter(Boolean));
@@ -1157,7 +1246,7 @@ async function dbxAfterConnect(was){
   const mine=await hasBooksDB();
   if(was){toast("Dropbox re-linked.");if(mine)cloudBackupNow(true);else cloudRestore();return}
   let remote=null;try{remote=await dbxDownload()}catch{}
-  if(remote&&!mine){toast("Dropbox linked. Bringing your books back…");await cloudRestore();return}
+  if(remote&&!mine){toast("Restoring from Dropbox…");await cloudRestore();return}
   if(remote&&mine){CLOUD.conflict=true;await cloudPersist();redrawSoon();return}
   toast("Dropbox linked.");cloudBackupNow(true)}
 async function dbxToken(){const d=CLOUD.dbx||{};if(d.access&&Date.now()<d.exp-60000)return d.access;const r=await fetch("https://api.dropboxapi.com/oauth2/token",{method:"POST",body:new URLSearchParams({grant_type:"refresh_token",refresh_token:d.refresh||"",client_id:CFG.dropboxAppKey})});if(!r.ok){if(r.status===400||r.status===401){CLOUD.relink=true;await cloudPersist()}throw new Error("Dropbox needs to be re-linked. Your books are safe on this device.")}const j=await r.json();d.access=j.access_token;d.exp=Date.now()+(Number(j.expires_in)||14400)*1000;CLOUD.dbx=d;await cloudPersist();return d.access}
@@ -1230,27 +1319,27 @@ async function shareBackupFile(){
   BK.lastFile=new Date().toISOString();BK.changes=0;await bkPersist();toast("Backup saved.");render(true)}
 async function gAfterConnect(){
   const mine=await hasBooksDB();let has=null;try{has=await gFindFile(true)}catch{}
-  if(has){CLOUD.gFileId=has.id;await cloudPersist();if(mine){CLOUD.conflict=true;await cloudPersist();redrawSoon();return}toast("Google Drive linked. Bringing your books back…");await cloudRestore();return}
+  if(has){CLOUD.gFileId=has.id;await cloudPersist();if(mine){CLOUD.conflict=true;await cloudPersist();redrawSoon();return}toast("Restoring from Google Drive…");await cloudRestore();return}
   toast("Google Drive linked.");cloudBackupNow(true)}
 function homeBackupCard(){
   const online=location.protocol==="https:"||location.hostname==="localhost";const dOk=!!CFG.dropboxAppKey&&online,gOk=!!CFG.googleClientId&&online;
   if(gOk&&!CLOUD.provider)setTimeout(()=>loadGis().catch(()=>{}),0);
-  const tip=isPhone()&&!isInstalled()?`<p class="note" style="margin:10px 0 0">📱 Add this app to your Home Screen (Share › Add to Home Screen) so your phone keeps your books and remembers your backup.</p>`:"";
+  const tip=isPhone()&&!isInstalled()?`<p class="note" style="margin:10px 0 0">Add this to your Home Screen (Share › Add to Home Screen) so your phone keeps your data.</p>`:"";
   const where=dOk&&gOk?"Dropbox or Google Drive":gOk?"Google Drive":"Dropbox";
   const card=(cls,title,body,btns)=>`<section class="panel bkcard ${cls}"><div class="label">Backup${CLOUD.provider?" · "+esc(cloudName()):""}</div><div class="bkhead">${title}</div>${body?`<p class="note" style="margin:6px 0 10px">${body}</p>`:""}<div class="row">${btns}</div>${tip}</section>`;
   const linkBtns=(cls)=>`${dOk?`<button class="btn ${cls}" data-act="cloudDropbox">Link Dropbox</button>`:""}${gOk?`<button class="btn ${dOk?"":cls}" data-act="cloudGoogle">Link Google Drive</button>`:""}`;
   const loadBtn=`<label tabindex="0" role="button" class="btn sm ghost" for="jsonIn">Load a backup file</label>`;
   if(CLOUD.provider){const nm=esc(cloudName()),g=CLOUD.provider==="google";
-    if(CLOUD.relink)return card("bad",`${nm} needs to be re-linked`,"Your books are safe on this phone. Re-link it and backups start again.",`<button class="btn gold" data-act="cloudRelink">Re-link ${nm}</button>`);
-    if(CLOUD.conflict)return card("warn",`There's already a backup in your ${nm}`,"It may be from another phone. Bring it in to add those books to this phone, or replace it with what's on this phone.",`<button class="btn gold" data-act="bkMerge">Bring it in</button><button class="btn" data-act="bkReplace">Replace it</button>`);
-    if(CLOUD.encrypt&&!cloudKey)return card("warn","Backups are paused until you unlock","Your backup is locked with your passphrase. Enter it in Settings › Privacy to keep backing up.",`<button class="btn gold" data-act="tab" data-v="settings">Unlock</button>`);
+    if(CLOUD.relink)return card("bad",`${nm} needs to be re-linked`,"Your books are still on this phone.",`<button class="btn gold" data-act="cloudRelink">Re-link ${nm}</button>`);
+    if(CLOUD.conflict)return card("warn",`There's already a backup in your ${nm}`,"Probably from another phone. Bring it in, or replace it with this phone's books.",`<button class="btn gold" data-act="bkMerge">Bring it in</button><button class="btn" data-act="bkReplace">Replace it</button>`);
+    if(CLOUD.encrypt&&!cloudKey)return card("warn","Backups are paused until you unlock","Enter your passphrase in Settings › Privacy.",`<button class="btn gold" data-act="tab" data-v="settings">Unlock</button>`);
     const needSign=g&&CLOUD.lastErr&&/sign in|sign-in/i.test(CLOUD.lastErr);
-    if(needSign)return card("warn",CLOUD.dirty?"Changes waiting to back up":"Google needs you to sign in","Google keeps the app signed in for about an hour at a time. Tap below to sign in and back up.",`<button class="btn gold" data-act="cloudNow">Sign in and back up</button>`);
-    return card(CLOUD.lastErr?"bad":"good",cloudBusy?`<span class="spin"></span> Backing up to ${nm}…`:CLOUD.lastErr?esc(CLOUD.lastErr):CLOUD.lastSync?`✓ Backed up to ${nm} ${ago(CLOUD.lastSync)}`:`Linked to ${nm}`,g?"Saves on its own after changes while you're signed in to Google.":"Saves on its own a few seconds after each change and when you close the app.",`<button class="btn sm gold" data-act="cloudNow" ${cloudBusy?"disabled":""}>Back up now</button>${CLOUD.lastErr&&/re-link/i.test(CLOUD.lastErr)?`<button class="btn sm" data-act="cloudRelink">Re-link</button>`:""}`)}
-  if((dOk||gOk)&&!hasBooks())return card("warn","Been here before?",`Link your ${where} to bring your books back, or start fresh below.`,`${linkBtns("gold")}${loadBtn}`);
-  if(dOk||gOk)return card("bad","Your books are only on this phone",`Link ${where} once and your books are saved there as you go. Lose your phone and they come right back.`,`${linkBtns("gold")}<button class="btn sm ghost" data-act="bkShare">Save a backup file</button>`);
+    if(needSign)return card("warn",CLOUD.dirty?"Changes waiting to back up":"Google needs you to sign in","Google signs you out after about an hour.",`<button class="btn gold" data-act="cloudNow">Sign in and back up</button>`);
+    return card(CLOUD.lastErr?"bad":"good",cloudBusy?`<span class="spin"></span> Backing up to ${nm}…`:CLOUD.lastErr?esc(CLOUD.lastErr):CLOUD.lastSync?`✓ Backed up to ${nm} ${ago(CLOUD.lastSync)}`:`Linked to ${nm}`,"",`<button class="btn sm gold" data-act="cloudNow" ${cloudBusy?"disabled":""}>Back up now</button>${CLOUD.lastErr&&/re-link/i.test(CLOUD.lastErr)?`<button class="btn sm" data-act="cloudRelink">Re-link</button>`:""}`)}
+  if((dOk||gOk)&&!hasBooks())return card("warn","Restore your books",`From the ${where} you backed up to.`,`${linkBtns("gold")}${loadBtn}`);
+  if(dOk||gOk)return card("bad","Not backed up",`Link ${where} to back up automatically.`,`${linkBtns("gold")}<button class="btn sm ghost" data-act="bkShare">Save a backup file</button>`);
   const st=BK.lastFile?`Last saved ${ago(BK.lastFile)}${BK.changes?` · ${BK.changes} change${BK.changes===1?"":"s"} since`:" · up to date"}`:hasBooks()?"Not backed up yet":"Back up your books";
-  return card(BK.lastFile&&!BK.changes?"good":hasBooks()?"bad":"",esc(st),"Tap Save, then pick <b>Dropbox</b> or <b>Google Drive</b> in the share menu (or Save to Files). On a new phone, use Load a backup file.",`<button class="btn gold" data-act="bkShare">Save backup</button>${loadBtn}`)}
+  return card(BK.lastFile&&!BK.changes?"good":hasBooks()?"bad":"",esc(st),"Pick Dropbox or Google Drive in the share menu.",`<button class="btn gold" data-act="bkShare">Save backup</button>${loadBtn}`)}
 
 /* ———————————— receipts attached to invoices ———————————— */
 function rcLine(r,invCur){const cur=r.currency||"CAD",fx=cur!==(invCur||"CAD");return{desc:`${cleanText(r.vendor)}${cleanText(r.note)&&cleanText(r.note).toLowerCase()!==cleanText(r.vendor).toLowerCase()?" – "+cleanText(r.note):""}${fx?` (${cur} ${plain(r.total)})`:""}`.slice(0,110),qty:"1",rate:String(num(r.total)),type:"reimb",taxable:false,rid:r.id}}
@@ -1259,14 +1348,14 @@ function addRcLine(r){const v=S.invEdit;if(!v)return;
   if(v.items.some(it=>it.rid===r.id))return;const ln=rcLine(r,v.currency);const blank=v.items.findIndex(it=>!it.desc&&!num(it.rate));if(blank>=0)v.items[blank]=ln;else v.items.push(ln)}
 function lineRcChip(it,i){const r=it.rid&&S.receipts.find(x=>x.id===it.rid);
   if(!r&&it._find==="searching")return `<span class="note"><span class="spin"></span> Looking for this receipt in Gmail…</span>`;
-  if(r)return `<span class="rcchip">📎 ${esc(r.vendor)} · ${money(r.total,r.currency)}${r.hasImage?" · photo":r.gid?" · email":""}${it._find==="found"?` · found automatically${it.rcNote?`, ${esc(it.rcNote)}`:""}, check it`:""}</span>${r.url?`<a class="lnk" href="${esc(r.url)}" target="_blank" rel="noopener">view</a>`:""}<button type="button" class="btn sm ghost" data-act="lineRcRm" data-v="${i}" aria-label="Remove receipt from this line">×</button>`;
+  if(r)return `<span class="rcchip">${esc(r.vendor)} · ${money(r.total,r.currency)}${r.hasImage?" · photo":r.gid?" · email":""}${it._find==="found"?` · found automatically${it.rcNote?`, ${esc(it.rcNote)}`:""}, check it`:""}</span>${r.url?`<a class="lnk" href="${esc(r.url)}" target="_blank" rel="noopener">view</a>`:""}<button type="button" class="btn sm ghost" data-act="lineRcRm" data-v="${i}" aria-label="Remove receipt from this line">×</button>`;
   return `${it._find==="none"?'<span class="note">No matching receipt found in Gmail.</span>':""}<button type="button" class="btn sm ghost ${S.rcTarget===i?"gold":""}" data-act="lineRc" data-v="${i}">📎 ${S.rcTarget===i?"Pick a receipt below…":"Attach receipt"}</button>${gmailOn()&&lineType(it)==="reimb"&&it._find!=="none"?`<button type="button" class="btn sm ghost" data-act="lineFind" data-v="${i}">🔎 Find in Gmail</button>`:""}`}
 function rcBox(v){
   const att=v.items.map((it,i)=>({it,i,r:it.rid&&S.receipts.find(x=>x.id===it.rid)})).filter(x=>x.r);
   const st=S.invRc;
   return `<section class="rcbox"><div class="label">Receipts for this invoice</div>
-${S.rcTarget!=null&&v.items[S.rcTarget]?`<div class="panel hot row" style="justify-content:space-between;margin:6px 0 10px;padding:10px 12px"><span>Attaching a receipt to line ${S.rcTarget+1}: <b>${esc(v.items[S.rcTarget].desc||"(empty line)")}</b></span><button class="btn sm ghost" data-act="lineRcCancel">Cancel</button></div>`:`<p class="note" style="margin:4px 0 10px">Tap 📎 Attach receipt on any line, or add receipts here to make new reimbursement lines. They go out with the invoice email.</p>`}
-${att.length?`<div class="list" style="margin-bottom:10px">${att.map(x=>`<div class="rowline"><span>📎 ${esc(x.r.vendor)} <span class="dim">· ${esc(x.r.date)}${x.r.hasImage?" · photo":x.r.gid?" · email":""}</span></span><span class="mono">${money(num(x.it.rate),v.currency)}</span></div>`).join("")}</div>`:""}
+${S.rcTarget!=null&&v.items[S.rcTarget]?`<div class="panel hot row" style="justify-content:space-between;margin:6px 0 10px;padding:10px 12px"><span>Attaching a receipt to line ${S.rcTarget+1}: <b>${esc(v.items[S.rcTarget].desc||"(empty line)")}</b></span><button class="btn sm ghost" data-act="lineRcCancel">Cancel</button></div>`:`<p class="note" style="margin:4px 0 10px">These go out with the invoice.</p>`}
+${att.length?`<div class="list" style="margin-bottom:10px">${att.map(x=>`<div class="rowline"><span>${esc(x.r.vendor)} <span class="dim">· ${esc(x.r.date)}${x.r.hasImage?" · photo":x.r.gid?" · email":""}</span></span><span class="mono">${money(num(x.it.rate),v.currency)}</span></div>`).join("")}</div>`:""}
 <div class="row">${gmailOn()?`<button class="btn sm" data-act="gfindOpen">${ICON.mail}Find in Gmail</button>`:""}<label tabindex="0" role="button" class="btn sm" for="rcInvCam">${ICON.cam}Take photo</label><label tabindex="0" role="button" class="btn sm" for="rcInvLib">${ICON.up}Screenshot or PDF</label><button class="btn sm ghost" data-act="openPicker">From my receipts</button></div>
 ${st?`<div style="margin-top:8px">${st.status==="preparing"?'<span class="note"><span class="spin"></span> Opening the image…</span>':st.status==="reading"?'<span class="note"><span class="spin"></span> Reading the receipt…</span>':st.status==="done"?`<span class="ok">${esc(st.msg)}</span>`:`<span class="err">${esc(st.err||"")}</span>`}</div>`:""}
 ${S.gfind?gfindView():""}
@@ -1406,10 +1495,10 @@ async function emailParts(gid){
   if(S.mailCache[gid])return S.mailCache[gid];
   const p=pl(await S.mcp.callTool("Gmail","get_message",{messageId:gid,messageFormat:"RAW"},{cache:false}));
   const raw=p.raw||p.message&&p.message.raw;if(!raw)throw new Error("no raw");
-  const leaves=mimeLeaves(b64ToBin(raw));const dec=l=>{try{return new TextDecoder(l.charset).decode(binToBytes(l.bin))}catch{return l.bin}};
+  const rawStr=b64ToBin(raw);const leaves=mimeLeaves(rawStr);const meta={subject:mimeHeader(rawStr,"Subject"),from:mimeHeader(rawStr,"From"),date:mimeHeader(rawStr,"Date")};const dec=l=>{try{return new TextDecoder(l.charset).decode(binToBytes(l.bin))}catch{return l.bin}};
   const html=leaves.find(l=>l.ct==="text/html"&&!l.filename);const text=leaves.find(l=>l.ct==="text/plain"&&!l.filename);
   const pdfs=leaves.filter(l=>l.ct==="application/pdf"||/\.pdf$/i.test(l.filename)).map(l=>({filename:l.filename||"receipt.pdf",b64:btoa(l.bin)}));
-  return S.mailCache[gid]={html:html?dec(html):"",text:text?dec(text):"",pdfs};
+  return S.mailCache[gid]={html:html?dec(html):"",text:text?dec(text):"",pdfs,meta};
 }
 async function htmlSnapshot(html){
   const doc=new DOMParser().parseFromString(html,"text/html");
@@ -1430,32 +1519,15 @@ async function htmlSnapshot(html){
 }
 function rcsOf(inv){return (inv.items||[]).map((it,idx)=>({it,idx,r:it.rid&&S.receipts.find(x=>x.id===it.rid)})).filter(x=>x.r).filter((x,k,a)=>a.findIndex(y=>y.r.id===x.r.id)===k)}
 async function buildReceiptsPdf(inv,opts={}){
-  const mode=opts.mode||S.rcMode||"best";const list=rcsOf(inv);if(!list.length)return{doc:null,originals:[]};
+  const list=rcsOf(inv);if(!list.length)return{doc:null,originals:[]};
   await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
-  const {jsPDF}=window.jspdf;const doc=new jsPDF({unit:"pt",format:"letter"});const W=612,H=792,M=42;const originals=[];let first=true;
-  const header=(r,it,k,sub)=>{if(!first)doc.addPage();first=false;
-    doc.setFillColor(244,244,244);doc.rect(0,0,W,86,"F");doc.setTextColor(30);doc.setFont("helvetica","bold");doc.setFontSize(15);doc.text(`Receipt ${k+1} of ${list.length}: ${r.vendor}`.slice(0,70),M,36);
-    doc.setFont("helvetica","normal");doc.setFontSize(10);doc.setTextColor(80);doc.text(`${fmtDate(r.date,"mmm d, yyyy")}   ·   ${money(r.total,r.currency)} ${r.currency||"CAD"}${num(r.taxPaid)?`   ·   GST/HST ${money(r.taxPaid,r.currency)}`:""}`,M,54);
-    doc.text(doc.splitTextToSize(`Billed on ${docTitle(inv).toLowerCase()} #${inv.number} (${inv.client}), line: ${it.desc}`,W-2*M)[0],M,70);
-    if(sub){doc.setFontSize(9);doc.setTextColor(120);doc.text(sub,M,100)}doc.setTextColor(0);return sub?112:104};
-  const placeCanvas=(c,cw,ch,y0)=>{const maxW=W-2*M;const s=maxW/cw;let srcY=0;let y=y0;
-    while(srcY<ch){const room=(H-M-y)/s;const take=Math.min(ch-srcY,room);const piece=document.createElement("canvas");const k=c.width/cw;piece.width=c.width;piece.height=Math.round(take*k);piece.getContext("2d").drawImage(c,0,srcY*k,c.width,take*k,0,0,c.width,take*k);
-      doc.setDrawColor(210);doc.rect(M-1,y-1,maxW+2,take*s+2);doc.addImage(piece.toDataURL("image/jpeg",.72),"JPEG",M,y,maxW,take*s);srcY+=take;if(srcY<ch){doc.addPage();y=M}}};
-  for(let k=0;k<list.length;k++){
-    const {r,it}=list[k];
-    if(r.hasImage){const img=await getImage(r.id);const y0=header(r,it,k,"Photo of the receipt");if(img){const pr=doc.getImageProperties(img);const s=Math.min((W-2*M)/pr.width,(H-y0-M)/pr.height);doc.setDrawColor(210);doc.rect(M-1,y0-1,pr.width*s+2,pr.height*s+2);doc.addImage(img,"JPEG",M,y0,pr.width*s,pr.height*s)}continue}
-    let parts=null;if(r.gid&&S.mcp&&mode!=="summary"){try{parts=await emailParts(r.gid)}catch{}}
-    if(parts&&parts.pdfs.length&&mode==="best"){parts.pdfs.forEach((p,n)=>originals.push({content:p.b64,filename:`Receipt ${k+1} - ${safeName(r.vendor)}${parts.pdfs.length>1?` (${n+1})`:""}.pdf`,mimeType:"application/pdf"}));
-      const y0=header(r,it,k,"");doc.setFontSize(11);doc.text(doc.splitTextToSize(`The original receipt from ${r.vendor} is attached to the email as its own PDF: ${parts.pdfs.map((p,n)=>`Receipt ${k+1} - ${safeName(r.vendor)}${parts.pdfs.length>1?` (${n+1})`:""}.pdf`).join(", ")}.`,W-2*M),M,y0+10);continue}
-    if(parts&&parts.html){try{const snap=await htmlSnapshot(parts.html);const y0=header(r,it,k,"Copy of the emailed receipt");placeCanvas(snap.c,snap.W,snap.H,y0);continue}catch{}}
-    const y0=header(r,it,k,r.gid?"Summary of the emailed receipt":"Receipt details");let y=y0+10;doc.setFontSize(11);
-    const rows=[["Vendor",r.vendor],["Date",fmtDate(r.date,"mmm d, yyyy")],["Total",`${money(r.total,r.currency)} ${r.currency||"CAD"}`],["GST/HST",num(r.taxPaid)?money(r.taxPaid,r.currency):"none shown"],["What it was",r.note||r.category]];
-    rows.forEach(([a,b])=>{doc.setFont("helvetica","bold");doc.text(a,M,y);doc.setFont("helvetica","normal");doc.splitTextToSize(String(b),W-2*M-110).forEach((l,n)=>doc.text(l,M+110,y+n*14));y+=22});
-    const txt=String((parts&&parts.text)||r.emailText||"").split(/\n/).map(l=>l.trim()).filter(l=>l&&/\d/.test(l)&&/\$|total|tax|gst|hst|amount|paid|fare|fee|subtotal|charged/i.test(l)&&l.length<120).slice(0,14);
-    if(txt.length){y+=8;doc.setFont("helvetica","bold");doc.text("From the email",M,y);y+=16;doc.setFont("helvetica","normal");doc.setFontSize(10);txt.forEach(l=>{doc.text(l,M,y);y+=13})}
-  }
-  return{doc,originals};
-}
+  const {jsPDF}=window.jspdf;const doc=new jsPDF({unit:"pt",format:"letter"});const W=612,H=792,M=36,TOP=40;
+  for(let k=0;k<list.length;k++){const {r}=list[k];const v=await receiptVisual(r);if(k)doc.addPage();
+    doc.setFont("helvetica","normal");doc.setFontSize(8);doc.setTextColor(140);doc.text(`${r.vendor}, ${fmtDate(r.date,"mmm d, yyyy")}, ${money(r.total,r.currency)}${(r.currency||"CAD")!=="CAD"?" "+r.currency:""}`.slice(0,110),M,24);doc.setTextColor(0);
+    if(v.url){const pr=doc.getImageProperties(v.url);const s=Math.min((W-2*M)/pr.width,(H-TOP-M)/pr.height);const fmt=/^data:image\/png/i.test(v.url)?"PNG":"JPEG";
+      if(v.kind!=="photo"){doc.setDrawColor(225);doc.rect(M-.5,TOP-.5,pr.width*s+1,pr.height*s+1)}doc.addImage(v.url,fmt,M,TOP,pr.width*s,pr.height*s)}
+    else{doc.setFontSize(12);[r.vendor,fmtDate(r.date,"mmm d, yyyy"),`${money(r.total,r.currency)} ${r.currency||"CAD"}`,num(r.taxPaid)?`GST/HST ${money(r.taxPaid,r.currency)}`:"",r.note||""].filter(Boolean).forEach((l,n)=>doc.text(String(l),M,TOP+20+n*18))}}
+  return{doc,originals:[]}}
 const rcCount=inv=>new Set((inv.items||[]).map(it=>it.rid).filter(Boolean)).size;
 
 
@@ -1476,7 +1548,7 @@ function parseQty(desc){
   if(!(rate>0&&n>0&&n<=400))return null;
   return{rate,n,amt:Math.round(rate*n*100)/100};
 }
-function lineHint(it){const i=S.invEdit?S.invEdit.items.indexOf(it):-1;const fix=it.fix&&it.fix!==it.desc?`<span class="note">✎ Did you mean “${esc(it.fix)}”?</span> <button type="button" class="btn sm ghost" data-act="useFix" data-v="${i}">Use it</button> <button type="button" class="btn sm ghost" data-act="noFix" data-v="${i}">Keep mine</button>`:"";return fix+lineHint0(it)}
+function lineHint(it){const i=S.invEdit?S.invEdit.items.indexOf(it):-1;const fix=it.fix&&it.fix!==it.desc?`<span class="note">Did you mean “${esc(it.fix)}”?</span> <button type="button" class="btn sm ghost" data-act="useFix" data-v="${i}">Use it</button> <button type="button" class="btn sm ghost" data-act="noFix" data-v="${i}">Keep mine</button>`:"";return fix+lineHint0(it)}
 function lineHint0(it){const q=parseQty(it.desc);if(!q)return "";const ok=Math.abs(num(it.rate)-q.amt)<.005;return ok?`<span class="ok">= ${money(q.amt)} (${plain(q.rate)} × ${plain(q.n)})</span>`:`<span class="note">${plain(q.rate)} × ${plain(q.n)} = ${money(q.amt)}</span> <button type="button" class="btn sm ghost" data-act="useQty" data-v="${S.invEdit?S.invEdit.items.indexOf(it):""}">Use it</button>`}
 function onLineDesc(i){
   const v=S.invEdit,it=v&&v.items[i];if(!it)return;it.fix="";
@@ -1562,9 +1634,9 @@ function voicePanel(){
   const st=S.voice;
   return `<section class="panel hot"><span class="plaque" style="cursor:default">Voice invoice</span>
 <p class="note" style="margin:8px 0 10px">Say who to bill and what for, like: <i>“Bill Jane Smith for Saturday's show, 450, two travel days at 150, per diem 3 days at 30, and the flight reimbursement 289.50.”</i> Claude fills in the invoice, then you check it before saving or making the Gmail draft.</p>
-<textarea id="vq-text" data-bind="voice.text" style="min-height:110px" placeholder="Tap here, then tap the 🎤 on your keyboard and talk, or just type">${esc(st.text||"")}</textarea>
+<textarea id="vq-text" data-bind="voice.text" style="min-height:110px" placeholder="Type or use your keyboard mic">${esc(st.text||"")}</textarea>
 <div class="row" style="margin-top:10px">${SR&&!micBlocked()?`<button class="btn ${st.rec?"armed":""}" data-act="vqMic">${ICON.mic}${st.rec?"Stop listening":"Talk"}</button>`:""}<button class="btn gold" data-act="vqGo" ${st.busy?"disabled":""}>${st.busy?'<span class="spin"></span> Filling in the invoice…':"Fill in the invoice"}</button><button class="btn ghost" data-act="vqClose">Cancel</button></div>
-${st.rec?'<div class="note" style="margin-top:8px"><span class="spin"></span> Listening… start talking.</div>':""}${st.err?`<div class="err" style="margin-top:8px">${esc(st.err)}</div>`:""}${!st.err&&(!SR||micBlocked())?`<p class="note" style="margin-top:8px">Tip: tap the box, then the 🎤 on your keyboard to talk.</p>`:""}</section>`;
+${st.rec?'<div class="note" style="margin-top:8px"><span class="spin"></span> Listening… start talking.</div>':""}${st.err?`<div class="err" style="margin-top:8px">${esc(st.err)}</div>`:""}${!st.err&&(!SR||micBlocked())?`<p class="note" style="margin-top:8px">Use the mic on your keyboard to talk.</p>`:""}</section>`;
 }
 function voiceFixBox(v){
   const st=S.vfix||{};
@@ -1596,8 +1668,8 @@ function vInvEdit(){
   const v=S.invEdit,foreign=v.currency!=="CAD",t=invTotals(v);const ov=v.taxOverride!==null&&v.taxOverride!==undefined&&v.taxOverride!=="";
   return `<section class="panel hot">
 <span class="plaque" style="cursor:default">${v.isNew?(v.imported?"Check imported invoice":"New invoice"):"Edit invoice"}</span>
-${v.imported?`<p class="note" style="margin-top:10px">Read from your file. Check every number before saving.</p>`:""}
-${v.voice?`<p class="note" style="margin:10px 0">Filled in from what you said. Check the client, email, date and every line, then Save. The Gmail draft button is on the next screen.</p>`:""}
+${v.imported?`<p class="note" style="margin-top:10px">Check the numbers before saving.</p>`:""}
+${v.voice?`<p class="note" style="margin:10px 0">Check it over, then save.</p>`:""}
 <div style="margin-top:12px">${voiceFixBox(v)}</div>
 <div class="grid3" style="margin-top:14px">
 <div class="field"><label class="label" for="ie-num">Invoice #</label><input id="ie-num" data-bind="invEdit.number" value="${esc(v.number)}"></div>
@@ -1622,6 +1694,7 @@ ${foreign?`<p class="note">Foreign-currency invoice: no GST/HST is charged, and 
 ${ov?`<span class="note">Tax fixed at ${money(v.taxOverride)} as on the original. <button class="btn sm ghost" data-act="clearOverride">Recalculate</button></span>`:""}</div>
 ${rcBox(v)}
 <div class="field" style="margin-top:14px"><label class="label" for="ie-notes">Note on the invoice (optional)</label><textarea id="ie-notes" data-bind="invEdit.notes">${esc(v.notes)}</textarea></div>
+<div class="field" style="margin-top:10px"><label class="label" for="ie-check">Private check notes (not on the invoice)</label><textarea id="ie-check" data-bind="invEdit.checkNotes">${esc(v.checkNotes||"")}</textarea></div>
 <div class="mono dim" id="ie-totals" style="margin:14px 0">${totalsLine(v,t)}</div>
 <div class="row"><button class="btn gold" data-act="saveInv">Save invoice</button><button class="btn ghost" data-act="cancelInv">Cancel</button></div>
 </section>`;
@@ -1679,7 +1752,8 @@ async function backupAllInvoices(){
 }
 function vInvView(inv){
   const t=invTotals(inv),s=S.settings;const arm=S.armed==="inv:"+inv.id;
-  if(S.mailFor!==inv.id){S.mailFor=inv.id;S.mailBody=isOverdue(inv)?reminderBody(inv):defaultMailBody(inv)}
+  if(S.mailFor!==inv.id){S.mailFor=inv.id;S.mailBody=defaultMailBody(inv)}
+  if(rcCount(inv))setTimeout(()=>loadAttPreview(inv),0);
   const bill=[inv.client,...String(inv.clientAddress||"").split("\n")].filter(Boolean);
   return `<div class="row"><button class="btn ghost" data-act="backInv">← Invoices</button>
 <button class="btn gold" data-act="readBack" data-v="${inv.id}">Read back</button>
@@ -1690,6 +1764,8 @@ ${inv.status==="draft"?`<button class="btn" data-act="status" data-v="${inv.id}"
 ${inv.status==="quote"?"":inv.status!=="paid"?`<button class="btn green" data-act="status" data-v="${inv.id}" data-s="paid">Mark paid</button>`:`<button class="btn ghost" data-act="status" data-v="${inv.id}" data-s="sent">Mark unpaid</button>`}
 <button class="btn ${arm?"armed":"danger"}" data-act="delInv" data-v="${inv.id}">${arm?"Tap again to delete":"Delete"}</button></div>
 ${inv.paidNote?`<div class="note">Payment: ${esc(inv.paidNote)}</div>`:""}
+${inv.reimbReview==="pending"?`<div class="panel hot row" style="justify-content:space-between"><span><b>Reimbursements not approved yet</b></span><button class="btn sm gold" data-act="openReview" data-v="${inv.id}">Review reimbursements</button></div>`:""}
+${inv.checkNotes?`<section class="panel hot"><div class="row" style="justify-content:space-between"><div class="label">To check before sending (only you see this)</div><button class="btn sm ghost" data-act="clearCheck" data-v="${inv.id}">Clear</button></div><div class="note" style="margin-top:8px;color:var(--text)">${esc(inv.checkNotes).replace(/\n/g,"<br>")}</div></section>`:""}
 ${inv.status==="sent"?`<div class="note ${isOverdue(inv)?"red":""}">Sent ${daysOut(inv)} days ago${isOverdue(inv)?". Over 30 days: the message below is set up as a friendly reminder.":"."}</div>`:""}
 ${inv.gmailUrl?`<div><a class="lnk" href="${esc(inv.gmailUrl)}" target="_blank" rel="noopener">Open the email this was sent in</a></div>`:""}
 <div class="panel splitline"><span>Pay <b>${money(t.pay,inv.currency)}</b></span><span>Per diems <b>${money(t.perdiem,inv.currency)}</b></span><span>Expense reimbursements <b>${money(t.reimb,inv.currency)}</b></span><span>${esc(inv.taxType==="HST"?"HST":"GST")} <b>${money(t.tax,inv.currency)}</b></span></div>
@@ -1697,13 +1773,14 @@ ${sheetHTML(inv)}
 <section class="panel">
 <div class="row" style="justify-content:space-between"><div class="label">Send it</div>${rbStatus(inv)}</div>
 <div class="field" style="margin-top:8px"><label class="label" for="mail-to">To</label><input id="mail-to" value="${esc(inv._to??inv.clientEmail)}" data-mailto="${inv.id}" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="email" placeholder="Tap for suggestions"><div class="sugg" id="sugg-mailto"></div></div>
-<div class="field" style="margin-top:8px"><label class="label" for="mail-body">Message</label><textarea id="mail-body" data-bind="mailBody" style="min-height:110px">${esc(S.mailBody)}</textarea></div>
-${rcCount(inv)?`<label class="chk" style="margin-top:8px"><input type="checkbox" data-attachrc="1" ${S.attachRc!==false?"checked":""}> Attach the ${rcCount(inv)} receipt${rcCount(inv)===1?"":"s"}</label>
-<div class="field" style="margin-top:8px"><label class="label" for="rc-mode">Emailed receipts go in as</label><select id="rc-mode" data-rcmode="1"><option value="best" ${(S.rcMode||"best")==="best"?"selected":""}>The original PDF if the email has one, otherwise a copy of the email</option><option value="snapshot" ${S.rcMode==="snapshot"?"selected":""}>A copy of the email (like a screenshot)</option><option value="summary" ${S.rcMode==="summary"?"selected":""}>A short summary page</option></select></div>`:""}
-<div class="row" style="margin-top:10px">${gmailOn()?`<button class="btn gold" data-act="mail" data-v="${inv.id}" ${S.busy.mail?"disabled":""}>${S.busy.mail?'<span class="spin"></span> Creating Gmail draft…':ICON.mail+(isOverdue(inv)?"Create reminder draft with PDF":"Create Gmail draft with PDF")}</button>`:`<button class="btn gold" data-act="dlAll" data-v="${inv.id}">Print / save as PDF</button><button class="btn" data-act="copyMsg">Copy the message</button>`}</div>${gmailOn()?"":`<p class="note" style="margin-top:6px">Print or save the PDF (on a phone: Share › Print, then pinch to save as PDF), copy the message, and send it from your own email app.</p>`}
+<div class="note" style="margin-top:8px">Subject: <b>${esc(mailSubject(inv))}</b></div>
+<div class="field" style="margin-top:6px"><label class="label" for="mail-body">Message</label><textarea id="mail-body" data-bind="mailBody" style="min-height:110px">${esc(S.mailBody)}</textarea></div>
+${rcCount(inv)?`<label class="chk" style="margin-top:8px"><input type="checkbox" data-attachrc="1" ${S.attachRc!==false?"checked":""}> Attach the ${rcCount(inv)} receipt${rcCount(inv)===1?"":"s"}</label>`:""}
+<div id="attBox">${attPreviewHTML(inv)}</div>
+<div class="row" style="margin-top:10px">${gmailOn()?`<button class="btn gold" data-act="mail" data-v="${inv.id}" ${S.busy.mail?"disabled":""}>${S.busy.mail?'<span class="spin"></span> Making the Gmail draft…':ICON.mail+(isOverdue(inv)?"Create reminder draft with PDF":"Create Gmail draft with PDF")}</button>`:`<button class="btn gold" data-act="dlAll" data-v="${inv.id}">Print / save as PDF</button><button class="btn" data-act="copyMsg">Copy the message</button>`}</div>${gmailOn()?"":`<p class="note" style="margin-top:6px">Print or save the PDF (on a phone: Share › Print, then pinch to save as PDF), copy the message, and send it from your own email app.</p>`}
 <div class="row" style="margin-top:8px">${OFFLINE?"":`<button class="btn sm" data-act="saveInvFiles" data-v="${inv.id}">${esc(saveWord())}${rcCount(inv)?`: invoice + ${rcCount(inv)} receipt${rcCount(inv)===1?"":"s"}`:": invoice PDF"}</button>`}</div>
 ${msgLine(S.invMail)}${msgLine(S.packetMsg||"")}
-${S.invMail&&S.invMail.startsWith("err:")?`<p class="note" style="margin-top:6px">Gmail sometimes times out with big attachments. Check your Gmail Drafts first, since the draft may have been made anyway. To be safe, tap <b>${esc(saveWord())}</b> to keep the invoice PDF and the receipt files, then send them from any email app.</p>`:""}
+${S.mailJob&&!S.mailJob.done&&S.mailJob.invId===inv.id?`<p class="note" style="margin-top:6px">Gmail is slow right now. It keeps trying in the background, so you can leave this page.</p>`:""}
 </section>${rbPromptHTML(inv)}`;
 }
 
@@ -1779,17 +1856,12 @@ async function rbAI(inv){const rb=S.rb;if(!rb||!S.sample)return;const sig=invSig
   catch(e){if(S.rb===rb){rb.ai={err:e&&e.code?sampleErr(e.code):"Claude couldn't read it back just now. The checks above still apply."};rbDraw()}}
 }
 async function rbLoadRc(inv){const rb=S.rb;for(const {r} of rcsOf(inv)){if(S.rb!==rb)return;const slot=rb.rc[r.id]={status:"loading"};rbDraw();
-  try{if(r.hasImage){const u=await getImage(r.id);if(u){slot.url=u;slot.kind="photo"}}
-    else if(r.gid&&S.mcp){const p=await emailParts(r.gid);
-      if(p.pdfs.length){try{const bin=atob(p.pdfs[0].b64);const c=await pdfToCanvas(new Blob([binToBytes(bin)],{type:"application/pdf"}));slot.url=drawScaled(c,1200).toDataURL("image/jpeg",.8);slot.kind="the PDF from the email"}catch{}}
-      if(!slot.url&&p.html){const s=await htmlSnapshot(p.html);slot.url=s.c.toDataURL("image/jpeg",.8);slot.kind="the email"}
-      if(!slot.url&&p.text)slot.text=p.text.slice(0,1500)}
-  }catch{}
+  try{const v=await receiptVisual(r);if(v.url){slot.url=v.url;slot.kind=v.kind==="photo"?"the photo":v.kind==="pdf"?"the PDF from the email":"the email"}}catch{}
   slot.status="done";rbDraw()}}
 function rbOpen(id){const inv=S.invoices.find(i=>i.id===id);if(!inv)return;S.rbPrompt=null;S.rb={id,rc:{},ai:null,speaking:false};
   let el=$("#rbRoot");if(!el){el=document.createElement("div");el.id="rbRoot";document.body.appendChild(el)}
-  document.body.classList.add("rbopen");rbDraw();el.querySelector(".rbsheet")?.focus();rbLoadRc(inv);rbAI(inv)}
-function rbClose(){try{window.speechSynthesis&&window.speechSynthesis.cancel()}catch{}S.rb=null;const el=$("#rbRoot");if(el)el.innerHTML="";document.body.classList.remove("rbopen")}
+  document.body.classList.add("rbopen");rbDraw();backDraw();el.querySelector(".rbsheet")?.focus();rbLoadRc(inv);rbAI(inv)}
+function rbClose(){setTimeout(backDraw,0);try{window.speechSynthesis&&window.speechSynthesis.cancel()}catch{}S.rb=null;const el=$("#rbRoot");if(el)el.innerHTML="";document.body.classList.remove("rbopen")}
 function rbDraw(){const el=$("#rbRoot"),rb=S.rb;if(!el)return;if(!rb){el.innerHTML="";return}const inv=S.invoices.find(i=>i.id===rb.id);if(!inv){rbClose();return}
   const sc=el.querySelector(".rbsheet");const top=sc?sc.scrollTop:0;
   const ck=rbChecks(inv),bad=ck.filter(c=>c.lvl==="bad"),warn=ck.filter(c=>c.lvl==="warn"),good=ck.filter(c=>c.lvl==="ok");
@@ -1798,9 +1870,9 @@ function rbDraw(){const el=$("#rbRoot"),rb=S.rb;if(!el)return;if(!rb){el.innerHT
   const t=invTotals(inv),cur=inv.currency||"CAD";const rcs=rcsOf(inv);
   el.innerHTML=`<div class="rbback" data-act="rbClose"></div><div class="rbsheet" role="dialog" aria-modal="true" aria-label="Read back" tabindex="-1">
 <div class="rbhead"><div><div class="label">Read back</div><div class="rbtitle">${inv.status==="quote"?"Quote":"Invoice"} #${esc(inv.number)} · ${esc(inv.client||"no name")}</div></div><button class="btn sm ghost" data-act="rbClose" aria-label="Close">Close</button></div>
-<div class="rbverdict ${nBad?"bad":nAll?"warn":ai&&ai.loading?"":"good"}">${nBad?`<b>${nBad} thing${nBad===1?"":"s"} to fix</b>${nAll>nBad?` and ${nAll-nBad} to check`:""} before you send it.`:nAll?`<b>${nAll} thing${nAll===1?"":"s"} to check.</b> Nothing looks wrong, just worth a look.`:ai&&ai.loading?`The basics check out. Claude is still reading it…`:`<b>Everything checks out.</b> ${money(t.total,cur)}${cur!=="CAD"?" "+cur:""} to ${esc(inv.client||"")}${rcs.length?`, with ${rcs.length} receipt${rcs.length===1?"":"s"}`:""}.`}</div>
-<div class="row" style="margin:10px 0 4px"><button class="btn sm" data-act="rbSay">${rb.speaking?"■ Stop reading":"🔊 Read it aloud"}</button></div>
-${S.sample?`<div class="rbai">${!ai||ai.loading?`<span class="note"><span class="spin"></span> Claude is reading it back…</span>`:ai.err?`<span class="note">${esc(ai.err)}</span>`:`<p>${esc(ai.readback)}</p>`}</div>`:""}
+<div class="rbverdict ${nBad?"bad":nAll?"warn":ai&&ai.loading?"":"good"}">${nBad?`<b>${nBad} thing${nBad===1?"":"s"} to fix</b>${nAll>nBad?` and ${nAll-nBad} to check`:""} before you send it.`:nAll?`<b>${nAll} thing${nAll===1?"":"s"} to check.</b>`:ai&&ai.loading?`Checking…`:`<b>Everything checks out.</b> ${money(t.total,cur)}${cur!=="CAD"?" "+cur:""} to ${esc(inv.client||"")}${rcs.length?`, with ${rcs.length} receipt${rcs.length===1?"":"s"}`:""}.`}</div>
+<div class="row" style="margin:10px 0 4px"><button class="btn sm" data-act="rbSay">${rb.speaking?"■ Stop reading":"Read it aloud"}</button></div>
+${S.sample?`<div class="rbai">${!ai||ai.loading?`<span class="note"><span class="spin"></span> Reading it…</span>`:ai.err?`<span class="note">${esc(ai.err)}</span>`:`<p>${esc(ai.readback)}</p>`}</div>`:""}
 ${bad.length||warn.length||aiIss.length?`<ul class="rblist">${[...bad,...aiIss.filter(i=>i.lvl==="bad"),...warn,...aiIss.filter(i=>i.lvl!=="bad")].map(li).join("")}</ul>`:""}
 <details class="rbok"><summary class="note">${good.length} check${good.length===1?"":"s"} passed</summary><ul class="rblist">${good.map(li).join("")}</ul></details>
 <div class="label" style="margin:16px 0 8px">The invoice</div>
@@ -1829,7 +1901,7 @@ function startBillLater(name){const key=clientKey(name).toLowerCase();const rs=S
   inv.client=past?past.client:name;if(past){inv.clientAddress=past.clientAddress||"";inv.clientEmail=past.clientEmail||"";inv.forLabel=past.forLabel||inv.forLabel;inv.currency=past.currency||inv.currency;inv.taxType=past.taxType||inv.taxType;inv.taxRate=past.taxRate??inv.taxRate}
   const curs=[...new Set(rs.map(r=>r.currency||"CAD"))];if(curs.length===1)inv.currency=curs[0];if(inv.currency!=="CAD"){inv.taxType="None";inv.taxRate=0}
   inv.items=[{desc:"",qty:"1",rate:"",taxable:true,type:"pay"},...rs.map(r=>({desc:cleanText(`${r.vendor} reimbursement (${shortDate(r.date)})${(r.currency||"CAD")!==inv.currency?` ${r.currency} ${num(r.total).toFixed(2)}, convert`:""}`),qty:"1",rate:String(num(r.total)),taxable:false,type:"reimb",rid:r.id}))];
-  S.invEdit=inv;S.tab="invoices";S.invViewId=null;S.voice=null;S.vfix=null;S.gfind=null;S.invRc=null;S.picker=null;render(true);window.scrollTo({top:0});
+  if(S.tab!=="invoices"){S.retTab=S.tab;S.retScroll=scrollY}S.invEdit=inv;S.tab="invoices";S.invViewId=null;S.voice=null;S.vfix=null;S.gfind=null;S.invRc=null;S.picker=null;render(true);window.scrollTo({top:0});
   toast(`Invoice started for ${inv.client} with ${rs.length} receipt${rs.length===1?"":"s"}. Add your pay on line 1, then save.`)}
 
 /* ———————————— receipt photo helpers: date sanity, duplicates, sturdier reading ———————————— */
@@ -1875,12 +1947,73 @@ async function batchApplyBill(B,bt,quiet){B.billSet=bt;let n=0;for(const id of B
 function batchPanel(){const B=S.batch;if(!B)return "";const pct=Math.round(B.done/B.total*100);
   return `<section class="panel hot" id="batchBox"><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><b>${B.running?`<span class="spin"></span> Adding receipts · ${B.done} of ${B.total}`:`${B.ids.length} of ${B.total} receipts added`}</b>${B.running?`<button class="btn sm ghost" data-act="batchStop">Stop</button>`:`<button class="btn sm ghost" data-act="batchDone">Done</button>`}</div>
 <div class="bar" style="margin:10px 0"><span style="width:${pct}%"></span></div>
-${B.running?`<p class="note" style="margin:0 0 8px">${S.sample&&S.canImages?"Claude is reading each photo. You can keep using the app.":"Saving the photos. You'll fill in the amounts afterwards."}</p>`:`<p class="note" style="margin:0 0 8px">${B.ids.length?`They're in the list below. Anything marked <b>Check</b> needs a quick look.`:""}</p>`}
+${B.running?`<p class="note" style="margin:0 0 8px">${S.sample&&S.canImages?"Reading the photos…":"Saving the photos…"}</p>`:`<p class="note" style="margin:0 0 8px">${B.ids.length?`Anything marked <b>Check</b> needs a look.`:""}</p>`}
 ${B.dups.length?`<div class="note" style="margin-bottom:8px">Skipped ${B.dups.length} you already had: ${B.dups.map(esc).join("; ")}</div>`:""}${B.unread?`<div class="note" style="margin-bottom:8px">${B.unread} couldn't be read. They're saved with the photo as “Couldn't read this one”: open each and tap <b>Read again</b>.</div>`:""}${B.fail.length?`<div class="err" style="margin-bottom:8px">${B.fail.map(esc).join("<br>")}</div>`:""}
 <label class="label" for="batch-billto">Bill all of these later to (optional)</label>${B.billSet?`<div class="ok" style="font-size:13px;margin:2px 0">✓ All ${B.running?"":B.ids.length+" "}set to bill later to ${esc(B.billSet)}</div>`:""}<div class="row" style="flex-wrap:nowrap;margin-top:4px"><input id="batch-billto" data-bind="batch.billTo" list="billto-list2" placeholder="Client name" value="${esc(B.billTo||"")}" autocomplete="off"><datalist id="billto-list2">${knownClients().map(n=>`<option value="${esc(n)}">`).join("")}</datalist>${!B.running&&B.ids.length?`<button class="btn sm" data-act="batchBill">Apply</button>`:""}</div></section>`}
 function batchDraw(){const el=$("#batchBox");if(!el){if(S.tab==="receipts")render();return}
   const ae=document.activeElement,typing=ae&&ae.id==="batch-billto";if(typing){const b=el.querySelector("b");if(b)b.innerHTML=S.batch.running?`<span class="spin"></span> Adding receipts · ${S.batch.done} of ${S.batch.total}`:`${S.batch.ids.length} of ${S.batch.total} receipts added`;const bar=el.querySelector(".bar span");if(bar)bar.style.width=Math.round(S.batch.done/S.batch.total*100)+"%";return}
   el.outerHTML=batchPanel()}
+
+/* ———————————— Back button (bottom left, like Safari) ———————————— */
+function backTarget(){if(S.rb)return "rb";const lb=$("#lbRoot");if(lb&&lb.innerHTML)return "lb";if(S.imgView)return "img";if(S.review)return "review";if(S.invEdit)return "invEdit";if(S.recDraft)return "draft";if(S.invViewId)return "invView";if(S.drill)return "drill";if(S.navHist&&S.navHist.length)return "tab";return ""}
+function goBack(){const t=backTarget();if(!t)return;
+  if(t==="rb"){rbClose();render(true);return}
+  if(t==="lb"){$("#lbRoot").innerHTML="";backDraw();return}
+  let y=0;
+  if(t==="img")S.imgView=null;
+  else if(t==="review"){const id=S.review.id;S.review=null;S.invViewId=id}
+  else if(t==="invEdit"){const id=S.invEdit.id,exists=S.invoices.some(i=>i.id===id);S.invEdit=null;S.voice=null;S.vfix=null;S.gfind=null;S.invRc=null;S.picker=null;if(exists)S.invViewId=id;else if(S.retTab&&S.retTab!=="invoices"){S.tab=S.retTab;S.retTab=null;y=S.retScroll||0}}
+  else if(t==="draft"){const d=S.recDraft;const dirty=d.preview||Object.keys(d.touched||{}).length;if(dirty&&!d.editOf&&S.armed!=="backDraft"){arm("backDraft");toast("Tap Back again to throw this receipt away.");return}if(S.ctl)S.ctl.abort();S.recDraft=null;S.armed=null}
+  else if(t==="invView"){S.invViewId=null;S.invMail="";if(S.retTab&&S.retTab!=="invoices")S.tab=S.retTab;S.retTab=null;y=S.retScroll||0}
+  else if(t==="drill")S.drill=null;
+  else if(t==="tab"){S.tab=S.navHist.pop();S.invViewId=null;S.invEdit=null;S.recDraft=null;y=(S.tabScroll||{})[S.tab]||0}
+  S.retScroll=null;render(true);window.scrollTo({top:y})}
+function backDraw(){let b=$("#backBtn");const t=backTarget();if(!t){if(b)b.hidden=true;document.body.classList.remove("hasback");return}
+  if(!b){b=document.createElement("button");b.id="backBtn";b.className="backbtn";b.dataset.act="goBack";b.setAttribute("aria-label","Back");b.innerHTML='<svg width="12" height="20" viewBox="0 0 12 20" aria-hidden="true"><path d="M10 2 2 10l8 8" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Back</span>';document.body.appendChild(b)}
+  b.hidden=false;document.body.classList.add("hasback")}
+
+/* ———————————— review reimbursements: approve or reject each reimbursement line on an agent-drafted invoice (app-only, never on the PDF or email) ———————————— */
+const pendingReviews=()=>S.invoices.filter(i=>i.reimbReview==="pending").sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+const reimbIdx=inv=>(inv.items||[]).map((it,k)=>lineType(it)==="reimb"?k:-1).filter(k=>k>=0);
+function reviewBanners(){const ps=pendingReviews();if(!ps.length)return "";
+  return ps.map(i=>{const n=reimbIdx(i).length;return `<button class="panel hot card" data-act="openReview" data-v="${i.id}" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap"><span style="min-width:0"><span class="label">Needs your OK</span><br><b>Review reimbursements · #${esc(i.number)} ${esc(i.client||"no client")} · ${n} item${n===1?"":"s"}</b></span><span class="btn sm gold">Review</span></button>`}).join("")}
+function openReview(id){const inv=S.invoices.find(i=>i.id===id);if(!inv)return;
+  S.review={id,dec:{}};S.tab="invoices";S.invEdit=null;S.invViewId=id;S.voice=null;S.rbPrompt=null;render(true);window.scrollTo({top:0});rvLoadImgs(inv)}
+async function rvLoadImgs(inv){let got=false;for(const k of reimbIdx(inv)){const it=inv.items[k];const r=it.rid&&S.receipts.find(x=>x.id===it.rid);if(r&&r.hasImage&&!S.imgCache[r.id]){const u=await getImage(r.id);if(u)got=true}}
+  if(got&&S.review&&S.review.id===inv.id)render(true)}
+function rvItems(inv){const dec=(S.review&&S.review.dec)||{};return (inv.items||[]).filter((it,k)=>!(lineType(it)==="reimb"&&dec[k]===false))}
+function vReview(inv){
+  const idx=reimbIdx(inv),dec=S.review.dec,cur=inv.currency||"CAD";
+  const kept={...inv,items:rvItems(inv)},t=invTotals(kept),all=invTotals(inv);
+  const nOk=idx.filter(k=>dec[k]!==false).length,nNo=idx.length-nOk;
+  const cards=idx.map(k=>{const it=inv.items[k],ok=dec[k]!==false,amt=num(it.qty||1)*num(it.rate);const r=it.rid&&S.receipts.find(x=>x.id===it.rid);
+    const img=r&&r.hasImage?S.imgCache[r.id]:null;
+    return `<div class="panel" style="${ok?"":"border-color:var(--red);opacity:.8"}">
+<div class="row" style="justify-content:space-between;flex-wrap:nowrap;align-items:flex-start"><b style="min-width:0;overflow-wrap:anywhere">${esc(it.desc||"(no description)")}</b><span class="mono" style="font-weight:600;white-space:nowrap${ok?"":";text-decoration:line-through"}">${money(amt,cur)}</span></div>
+${r?`<div class="row" style="margin-top:8px;align-items:flex-start;gap:12px">${r.hasImage?(img?`<img class="thumb" src="${img}" alt="${esc(r.vendor)} receipt" style="max-width:120px;max-height:160px">`:`<span class="note"><span class="spin"></span> Loading photo…</span>`):""}<div style="flex:1;min-width:180px"><div>${esc(r.vendor)} <span class="dim">· ${esc(fmtDate(r.date,"mmm d, yyyy"))} · ${money(r.total,r.currency)}${(r.currency||"CAD")!==cur?" "+esc(r.currency):""}</span></div>${r.note?`<div class="note">${esc(r.note)}</div>`:""}${r.url?`<a class="lnk" href="${esc(r.url)}" target="_blank" rel="noopener">Open email</a>`:""}</div></div>`:`<div class="note" style="margin-top:6px">No receipt attached to this line.</div>`}
+<div class="row" style="margin-top:10px" role="group" aria-label="Approve or reject"><button class="btn sm ${ok?"green":"ghost"}" data-act="rvSet" data-v="${k}" data-ok="1" aria-pressed="${ok}">${ok?"✓ ":""}Approve</button><button class="btn sm ${ok?"ghost":"armed"}" data-act="rvSet" data-v="${k}" data-ok="0" aria-pressed="${!ok}">${ok?"":"✕ "}Not billable</button></div></div>`}).join("");
+  return `<div class="row"><button class="btn ghost" data-act="rvCancel">← Back</button></div>
+<section class="panel hot"><span class="plaque" style="cursor:default">Review reimbursements</span>
+<p class="note" style="margin:10px 0 0">#${esc(inv.number)} · ${esc(inv.client||"no client")} · ${esc(fmtDate(inv.date,"mmm d, yyyy"))}. Approve what ${esc(inv.client||"the client")} should pay you back for. Anything marked Not billable comes off the invoice and goes back into your own write-offs.</p></section>
+${idx.length?`<div class="list">${cards}</div>`:`<div class="panel"><p class="note" style="margin:0">This invoice has no reimbursement lines, so there's nothing to check.</p></div>`}
+<div class="panel splitline" style="position:sticky;bottom:calc(8px + env(safe-area-inset-bottom,0px));z-index:5"><span>Reimbursements <b>${money(t.reimb,cur)}</b>${nNo?` <span class="dim">(was ${money(all.reimb,cur)})</span>`:""}</span><span>${nOk} approved · ${nNo} not billable</span><span>Invoice total incl. ${esc(taxNm(inv))} <b>${money(t.total,cur)}</b></span></div>
+<div class="row"><button class="btn gold" data-act="rvSave">${idx.length?"Save &amp; approve":"Approve"}</button><button class="btn ghost" data-act="rvCancel">Cancel</button></div>`;
+}
+async function rvSave(){
+  const rv=S.review;if(!rv)return;const inv=S.invoices.find(i=>i.id===rv.id);if(!inv){S.review=null;render(true);return}
+  const idx=reimbIdx(inv),rej=idx.filter(k=>rv.dec[k]===false);
+  for(const k of rej){const rid=inv.items[k].rid;if(!rid)continue;const r=S.receipts.find(x=>x.id===rid);if(!r)continue;if(r.billedTo&&r.billedTo!==inv.id)continue;
+    const {billedTo,billedLine,billedLabel,billLater,...rest}=r;await save({...rest,notBilled:true},true)}
+  const items=(inv.items||[]).filter((it,k)=>!rej.includes(k));
+  const doc={...inv,items,reimbReview:"approved",reimbReviewedAt:Date.now()};
+  S.review=null;S.invViewId=inv.id;await save(doc);
+  const n=idx.length-rej.length;toast(`Approved ${n} reimbursement${n===1?"":"s"}${rej.length?`, removed ${rej.length}`:""}. Invoice total ${money(invTotals(doc).total,doc.currency||"CAD")}.`);render(true);window.scrollTo({top:0});
+}
+function parseReviewHash(){const h=String(location.hash||"").replace(/^#/,"");const m=h.match(/^review(?:=([\w-]+))?$/);return m?{id:m[1]||""}:null}
+S.reviewHash=(()=>{try{return parseReviewHash()}catch{return null}})();
+function checkReviewHash(){const h=S.reviewHash;if(!h||!S.booted)return;S.reviewHash=null;
+  const inv=h.id?S.invoices.find(i=>i.id===h.id):pendingReviews()[0];if(inv)openReview(inv.id)}
+window.addEventListener("hashchange",()=>{try{S.reviewHash=parseReviewHash()}catch{}checkReviewHash()});
 
 /* receipts */
 function vReceipts(){
@@ -1908,7 +2041,7 @@ ${!isCAD(r)?`<span class="chip goldc">${esc(r.currency)}</span>`:""}
 ${r.hasImage?`<button class="btn sm ghost" data-act="viewImg" data-v="${r.id}">Photo</button>`:""}
 ${OFFLINE?"":`<button class="btn sm ghost" data-act="saveRcFile" data-v="${r.id}" title="${esc(saveWord())}">Save</button>`}<button class="btn sm ghost" data-act="editRec" data-v="${r.id}">Edit</button>
 <button class="btn sm ${arm?"armed":"danger"}" data-act="delRec" data-v="${r.id}" aria-label="Delete receipt">${arm?"Tap again":"×"}</button>${!r.billedTo&&!m&&S.billPick!==r.id&&!r.needsReview&&!isPersonal(r)?`<button class="btn sm ghost" data-act="billPick" data-v="${r.id}">Billed?</button>`:""}${billBar(r,m)}${r.needsReview&&S.billPick!==r.id?revBar(r):""}</div>`}).join("")}</div>`
-:(!d?`<div class="panel empty"><h2>No receipts match</h2><p class="note">Change the filter, take a photo of a receipt, or check Gmail for new ones.</p></div>`:"")}`;
+:(!d?`<div class="panel empty"><h2>No receipts match</h2><p class="note">Nothing here.</p></div>`:"")}`;
 }
 function reimbLines(){
   const taken=new Set(S.receipts.filter(r=>r.billedTo&&r.billedLine!=null).map(r=>r.billedTo+"#"+r.billedLine));
@@ -1953,8 +2086,8 @@ ${d.currency==="CAD"?`<div class="field"><label class="label" for="rd-prov">Boug
 ${(S.settings.streams||[]).some(x=>x.type==="business")?`<div class="field"><label class="label" for="rd-stream">Which business?</label><select id="rd-stream" data-bind="recDraft.stream"><option value="">${esc(S.settings.tagline||"Music")} (main)</option>${(S.settings.streams||[]).filter(x=>x.type==="business").map(x=>`<option value="${x.id}" ${d.stream===x.id?"selected":""}>${esc(x.name)}</option>`).join("")}</select></div>`:""}
 <div class="field"><label class="label" for="rd-cat">Category</label><select id="rd-cat" data-bind="recDraft.category" data-rerender="1" ${reading?"disabled":""}>${CATS.map(c=>`<option ${c===d.category?"selected":""}>${esc(c)}</option>`).join("")}</select></div>
 <div class="field" style="grid-column:1/-1"><label class="label" for="rd-note">Note</label><input id="rd-note" data-bind="recDraft.note" value="${esc(d.note)}" placeholder="What it was for" ${reading?"disabled":""}></div>
-${isPersonal(d)||d.billedTo?"":`<div class="field billlater ${d.billLater?"on":""}" style="grid-column:1/-1"><label class="chk" style="padding:4px 0"><input type="checkbox" data-billlater="1" ${d.billLater?"checked":""} ${reading?"disabled":""}> <b>Bill later</b> <span class="note">· put this on a client's invoice</span></label>
-${d.billLater?`<input id="rd-billto" data-bind="recDraft.billTo" list="billto-list" autocomplete="off" placeholder="Who pays for this? (client name)" value="${esc(d.billTo||"")}"><datalist id="billto-list">${knownClients().map(n=>`<option value="${esc(n)}">`).join("")}</datalist><span class="note" style="font-size:12.5px">It waits in <b>Ready to bill</b> on the Invoices page until you make the invoice.</span>`:""}</div>`}</div>
+${isPersonal(d)||d.billedTo?"":`<div class="field billlater ${d.billLater?"on":""}" style="grid-column:1/-1"><label class="chk" style="padding:4px 0"><input type="checkbox" data-billlater="1" ${d.billLater?"checked":""} ${reading?"disabled":""}> <b>Bill later</b></label>
+${d.billLater?`<input id="rd-billto" data-bind="recDraft.billTo" list="billto-list" autocomplete="off" placeholder="Who pays for this? (client name)" value="${esc(d.billTo||"")}"><datalist id="billto-list">${knownClients().map(n=>`<option value="${esc(n)}">`).join("")}</datalist>`:""}</div>`}</div>
 ${d.currency!=="CAD"?`<p class="note">Foreign receipt: kept as a record; its tax never enters your GST/HST claim.</p>`:""}
 ${d.category===PERSONAL?`<p class="note">Personal items stay out of write-offs and GST/HST credits.</p>`:""}
 ${d.category==="Vehicle & fuel"?`<p class="note">Vehicle costs count at your business-use % (${Math.round(factors(yearOf(d.date)).veh*100)}%), set on the Mileage tab.</p>`:""}
@@ -1996,7 +2129,7 @@ function vSettings(){
 <div class="grid3"><div class="field"><label class="label" for="st-tl">Tax line label</label><input id="st-tl" data-bind="sf.taxLabel" value="${esc(s.taxLabel)}"></div>
 <div class="field"><label class="label" for="sf-tax">Default tax</label>${taxSelect("sf",{taxType:s.defaultTaxType,taxRate:s.defaultTaxRate},false)}</div>
 <div class="field"><label class="label" for="st-cur">Default currency</label><select id="st-cur" data-bind="sf.defaultCurrency">${CURS.map(c=>`<option ${c===s.defaultCurrency?"selected":""}>${c}</option>`).join("")}</select></div>
-<div class="field"><label class="label" for="st-prov">Your home province</label><select id="st-prov" data-bind="sf.homeProv">${provOpts(s.homeProv,"Pick one")}</select><span class="note" style="font-size:12.5px">Used to work out GST/HST on receipts that don't list it. Change it per receipt when you buy elsewhere.</span></div></div>
+<div class="field"><label class="label" for="st-prov">Your home province</label><select id="st-prov" data-bind="sf.homeProv">${provOpts(s.homeProv,"Pick one")}</select><span class="note" style="font-size:12.5px">For estimating tax when a receipt doesn't show it.</span></div></div>
 <div class="row"><button class="btn gold" data-act="saveSettings">Save</button>${S.sfDirty?`<button class="btn ghost" data-act="resetSettings">Undo changes</button>`:""}</div></div></section>
 <section class="panel" style="max-width:640px"><span class="plaque" style="cursor:default">Home studio &amp; goals</span>
 <div class="grid3" style="margin-top:14px">
@@ -2155,15 +2288,15 @@ document.addEventListener("click",async e=>{
   const b=e.target.closest("[data-act]");if(!b||b.tagName==="SELECT")return;
   const a=b.dataset.act,v=b.dataset.v;
   switch(a){
-    case "tab":S.tab=v;S.invMail="";S.imgView=null;if(v!=="invoices")S.invViewId=null;render(true);window.scrollTo({top:0});break;
+    case "tab":if(v!==S.tab){S.navHist=(S.navHist||[]).concat(S.tab).slice(-12);S.tabScroll={...(S.tabScroll||{}),[S.tab]:scrollY}}S.tab=v;S.review=null;S.invMail="";S.imgView=null;if(v!=="invoices")S.invViewId=null;render(true);window.scrollTo({top:0});break;
     case "year":S.year=Number(v);render(true);break;
     case "batchStop":if(S.batch)S.batch.stop=true;toast("Stopping after this one.");break;
     case "batchDone":S.batch=null;render(true);break;
     case "batchBill":{const B=S.batch;const bt=(B&&B.billTo||"").trim();if(!B||!bt)break;await batchApplyBill(B,bt,false);render(true);break}
     case "billNow":startBillLater(v);break;
-    case "newInvoice":S.tab="invoices";S.invViewId=null;S.voice=null;S.vfix=null;S.invEdit=blankInvoice();S.gfind=null;S.invRc=null;S.picker=null;render(true);break;
+    case "newInvoice":if(S.tab!=="invoices"){S.retTab=S.tab;S.retScroll=scrollY}S.tab="invoices";S.invViewId=null;S.voice=null;S.vfix=null;S.invEdit=blankInvoice();S.gfind=null;S.invRc=null;S.picker=null;render(true);break;
     case "editInv":{const inv=S.invoices.find(i=>i.id===v);if(inv){S.invEdit=JSON.parse(JSON.stringify(inv));S.invEdit.items=S.invEdit.items.map(it=>({desc:it.desc,qty:"1",rate:String(num(it.qty||1)*num(it.rate)),taxable:it.taxable!==false,type:lineType(it),...(it.rid?{rid:it.rid}:{})}))}S.tab="invoices";S.gfind=null;S.invRc=null;S.picker=null;render(true);break}
-    case "openInv":S.packetMsg="";S.tab="invoices";S.invEdit=null;S.invViewId=v;S.invMail="";render(true);window.scrollTo({top:0});break;
+    case "openInv":S.retTab=S.tab;S.retScroll=scrollY;S.packetMsg="";S.tab="invoices";S.invEdit=null;S.invViewId=v;S.invMail="";render(true);window.scrollTo({top:0});break;
     case "backInv":S.invViewId=null;S.invMail="";S.rbPrompt=null;render(true);break;
     case "clearImport":S.invImport=null;render(true);break;
     case "addLine":S.invEdit.items.push({desc:"",qty:"1",rate:"",taxable:S.invEdit.currency==="CAD",type:"pay"});render(true);break;
@@ -2173,7 +2306,17 @@ document.addEventListener("click",async e=>{
     case "saveInv":{const x=S.invEdit;const doc={...x,kind:"invoice",number:(x.number||"").trim()||nextNumber(),client:(x.client||"").trim(),clientAddress:(x.clientAddress||"").trim(),clientEmail:(x.clientEmail||"").trim(),forLabel:(x.forLabel||"").trim(),date:x.date||today(),items:x.items.filter(it=>it.desc||num(it.rate)).map(it=>({desc:cleanText(it.desc),qty:1,rate:num(it.rate),taxable:it.taxable!==false,type:lineType(it),...(it.rid?{rid:it.rid}:{})})),taxType:x.currency!=="CAD"?"None":x.taxType,taxRate:x.currency!=="CAD"?0:num(x.taxRate),taxOverride:x.taxOverride===null||x.taxOverride===undefined||x.taxOverride===""?null:num(x.taxOverride)};delete doc.isNew;delete doc.imported;delete doc.voice;delete doc.heard;if(!doc.items.length)doc.items=[{desc:"Services",qty:1,rate:0,taxable:true}];S.invEdit=null;S.picker=null;S.vfix=null;S.invViewId=doc.id;S.rbPrompt=doc.id;await save(doc);
       for(const it of doc.items){if(!it.rid)continue;const r=S.receipts.find(x=>x.id===it.rid);if(r&&r.billedTo!==doc.id)await save({...r,billedTo:doc.id,billedLabel:`#${doc.number} ${doc.client}`.slice(0,40)},true)}
       render(true);window.scrollTo({top:0});autoBackupInv(doc.id);break}
-    case "status":{const inv=S.invoices.find(i=>i.id===v);if(inv){await save({...inv,status:b.dataset.s});toast(b.dataset.s==="paid"?"Marked paid.":"Marked "+b.dataset.s+".");autoBackupInv(inv.id)}break}
+    case "status":{const inv=S.invoices.find(i=>i.id===v);if(inv){await save({...inv,status:b.dataset.s});toast(b.dataset.s==="paid"?`#${inv.number} marked paid.`:"Marked "+b.dataset.s+".");autoBackupInv(inv.id);if(b.dataset.s==="paid"&&S.invViewId===inv.id)goBack()}break}
+    case "mailNow":if(S.mailJob&&S.mailJob.state==="waiting"){clearTimeout(S.mailJob.timer);S.mailJob.running=false;runMailJob()}break;
+    case "mailStop":if(S.mailJob){clearTimeout(S.mailJob.timer);const j=S.mailJob;j.done=true;j.state="failed";S.busy.mail=false;S.invMail="err:Stopped. Check your Gmail drafts before trying again.";const cur=S.invoices.find(i=>i.id===j.invId);if(cur&&cur.mailPending)save({...cur,mailPending:null},true);mailDraw();render(true)}break;
+    case "attOpen":{const v2=S.attPrev&&S.attPrev.v[v];const r=S.receipts.find(x=>x.id===v);if(v2&&v2.url)lightbox(v2.url,r?`${r.vendor} · ${money(r.total,r.currency)}`:"");break}
+    case "lbClose":{const el=$("#lbRoot");if(el)el.innerHTML="";backDraw();break}
+    case "goBack":goBack();break;
+    case "openReview":openReview(v);break;
+    case "rvSet":if(S.review){S.review.dec[Number(v)]=b.dataset.ok==="1";render(true)}break;
+    case "rvSave":await rvSave();break;
+    case "rvCancel":{const id=S.review&&S.review.id;S.review=null;S.invViewId=id||S.invViewId;render(true);window.scrollTo({top:0});break}
+    case "clearCheck":{const inv=S.invoices.find(i=>i.id===v);if(inv){await save({...inv,checkNotes:""});toast("Check notes cleared.")}break}
     case "delInv":if(S.armed!=="inv:"+v){arm("inv:"+v);break}S.armed=null;S.invViewId=null;await removeDoc(v,"invoice");toast("Invoice deleted.");break;
     case "pdfRc":{const inv=S.invoices.find(i=>i.id===v);if(inv){receiptsPrintHTML(inv).then(printHTML)}break;try{toast("Building the receipts PDF…");const {doc:d,originals}=await buildReceiptsPdf(inv,{mode:S.rcMode==="best"?"snapshot":S.rcMode});if(d)await S.downloads.save({filename:`Receipts for ${pdfName(inv)}`,data:d.output("blob")})}catch(e){if(!(e&&e.code==="declined"))toast("Couldn't build the receipts PDF.")}break}
     case "gfindOpen":S.gfind={q:"",results:[],loading:false,busy:false,err:"",range:"any",token:"",seen:new Set()};S.picker=null;render(true);setTimeout(()=>{const q=$("#gf-q");if(q)q.focus()},50);break;
