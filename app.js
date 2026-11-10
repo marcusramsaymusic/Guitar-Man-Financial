@@ -421,7 +421,7 @@ const withTimeout=(p,ms)=>Promise.race([p,new Promise((_,rej)=>setTimeout(()=>re
 async function buildMailArgs(inv){
   const to=[...new Set((String(inv.clientEmail||"").match(/[^@\s<>"',;]+@[^@\s<>"',;]+\.[a-z]{2,}/gi)||[]).map(x=>x.toLowerCase()))];
   const doc=await buildInvoicePdf(inv);const atts=[{content:doc.output("datauristring").split(",")[1],filename:pdfName(inv),mimeType:"application/pdf"}];
-  let nrc=0;if(S.attachRc!==false&&rcCount(inv)){const {doc:rd}=await buildReceiptsPdf(inv);if(rd){nrc=rcCount(inv);atts.push({content:rd.output("datauristring").split(",")[1],filename:`Receipts for ${pdfName(inv)}`,mimeType:"application/pdf"})}}
+  let nrc=0;if(S.attachRc!==false){for(const [k,{r}] of rcsOf(inv).entries()){const fs=await oneReceiptPdfs(r,rcMailName(r,k));fs.forEach(f=>atts.push({content:f.b64,filename:f.name,mimeType:"application/pdf"}));if(fs.length)nrc++}}
   return{args:{to,subject:mailSubject(inv),body:S.mailFor===inv.id&&S.mailBody?S.mailBody:defaultMailBody(inv),attachments:atts,includeSignature:true},nrc}}
 async function draftAlreadyThere(j){try{const q=`to:${j.args.to[0]} subject:(${j.args.subject.replace(/[()"]/g," ")}) newer_than:2d`;const p=pl(await withTimeout(S.mcp.callTool("Gmail","list_drafts",{query:q,pageSize:5},{cache:false}),30000));return !!((p.drafts||[]).length)}catch{return false}}
 async function emailInvoice(inv){
@@ -499,7 +499,7 @@ async function receiptVisual(r){S.rcVis=S.rcVis||{};if(S.rcVis[r.id]&&S.rcVis[r.
 function attPreviewHTML(inv){const rcs=rcsOf(inv);const st=S.attPrev&&S.attPrev.id===inv.id?S.attPrev:null;
   const tiles=[`<button class="att" data-act="readBack" data-v="${inv.id}"><span class="attpdf">Invoice<br>#${esc(inv.number)}</span><span class="attcap">${esc(pdfName(inv))}</span></button>`];
   if(S.attachRc!==false)rcs.forEach(({r},k)=>{const v=st&&st.v[r.id];tiles.push(`<button class="att" data-act="attOpen" data-v="${r.id}" ${v&&v.url?"":"disabled"}>${v&&v.url?`<img src="${v.url}" alt="" class="${v.kind==="photo"?"":"doc"}">`:`<span class="attpdf">${v?"No copy":'<span class="spin"></span>'}</span>`}<span class="attcap">${k+1}. ${esc(r.vendor)} · ${money(r.total,r.currency)}</span></button>`)});
-  return `<div class="label" style="margin-top:12px">Attachments</div><div class="attrow">${tiles.join("")}</div>${rcs.length&&S.attachRc!==false?`<p class="note" style="margin:4px 0 0">${rcs.length} receipt${rcs.length===1?"":"s"} go in one PDF called “Receipts for ${esc(pdfName(inv))}”.</p>`:""}`}
+  return `<div class="label" style="margin-top:12px">Attachments</div><div class="attrow">${tiles.join("")}</div>${rcs.length&&S.attachRc!==false?`<p class="note" style="margin:4px 0 0">Each receipt goes in as its own PDF${rcs.length>1?`: ${rcs.map(({r},k)=>esc(rcMailName(r,k))+".pdf").join(", ")}`:"."}</p>`:""}`}
 async function loadAttPreview(inv){if(S.attPrev&&S.attPrev.id===inv.id&&S.attPrev.sig===invSig(inv))return;const st=S.attPrev={id:inv.id,sig:invSig(inv),v:{}};
   for(const {r} of rcsOf(inv)){if(S.attPrev!==st)return;try{st.v[r.id]=await receiptVisual(r)}catch{st.v[r.id]={kind:"none",url:""}}const box=$("#attBox");if(box&&S.invViewId===inv.id)box.innerHTML=attPreviewHTML(inv)}}
 function lightbox(url,cap){setTimeout(backDraw,0);let el=$("#lbRoot");if(!el){el=document.createElement("div");el.id="lbRoot";document.body.appendChild(el)}el.innerHTML=`<div class="lb" data-act="lbClose"><img src="${url}" alt=""><div class="lbcap">${esc(cap||"")} · tap to close</div></div>`}
@@ -564,7 +564,7 @@ function receiptEntry(r){const base=`${r.date} ${fileBase(r.vendor)} receipt`;
     if(v.kind==="pdf"&&v.pdfs)return v.pdfs.map((x,n)=>({blob:new Blob([binToBytes(atob(x.b64))],{type:"application/pdf"}),name:`${base}${v.pdfs.length>1?" "+(n+1):""}.pdf`}));
     if(v.url){const b=dataUrlBlob(v.url);if(b)return[{blob:b,name:`${base}.${imgExt(b.type)}`}]}
     return[await receiptSummaryPdf(r,`${base}.pdf`)]}}}
-function invoiceEntries(inv){return[{label:`${inv.status==="quote"?"Quote":"Invoice"} #${inv.number} (PDF)`,make:async()=>[{blob:(await buildInvoicePdf(inv)).output("blob"),name:invFileName(inv)}]},...rcsOf(inv).map(({r})=>receiptEntry(r))]}
+function invoiceEntries(inv){return[{label:`${inv.status==="quote"?"Quote":"Invoice"} #${inv.number} (PDF)`,make:async()=>[{blob:(await buildInvoicePdf(inv)).output("blob"),name:invFileName(inv)}]},...rcsOf(inv).map(({r})=>receiptPdfEntry(r))]}
 const saveWord=()=>dropboxOn()?"Save to Dropbox":"Save files";
 function startSave(title,entries){if(!S.downloads){toast("Saving files only works in the Claude app.");return}
   if(S.saveQ&&S.saveQ.busy)return;S.saveQ={title,items:entries.map(e=>({...e,status:"wait",files:null,fi:0,err:""})),i:0,busy:false,stopped:false};
@@ -1522,12 +1522,24 @@ async function buildReceiptsPdf(inv,opts={}){
   const list=rcsOf(inv);if(!list.length)return{doc:null,originals:[]};
   await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");
   const {jsPDF}=window.jspdf;const doc=new jsPDF({unit:"pt",format:"letter"});const W=612,H=792,M=36,TOP=40;
-  for(let k=0;k<list.length;k++){const {r}=list[k];const v=await receiptVisual(r);if(k)doc.addPage();
+  for(let k=0;k<list.length;k++){const {r}=list[k];const v=await receiptVisual(r);if(k)doc.addPage();rcPage(doc,r,v)}
+  return{doc,originals:[]}}
+function rcPage(doc,r,v){const W=612,H=792,M=36,TOP=40;
     doc.setFont("helvetica","normal");doc.setFontSize(8);doc.setTextColor(140);doc.text(`${r.vendor}, ${fmtDate(r.date,"mmm d, yyyy")}, ${money(r.total,r.currency)}${(r.currency||"CAD")!=="CAD"?" "+r.currency:""}`.slice(0,110),M,24);doc.setTextColor(0);
     if(v.url){const pr=doc.getImageProperties(v.url);const s=Math.min((W-2*M)/pr.width,(H-TOP-M)/pr.height);const fmt=/^data:image\/png/i.test(v.url)?"PNG":"JPEG";
       if(v.kind!=="photo"){doc.setDrawColor(225);doc.rect(M-.5,TOP-.5,pr.width*s+1,pr.height*s+1)}doc.addImage(v.url,fmt,M,TOP,pr.width*s,pr.height*s)}
     else{doc.setFontSize(12);[r.vendor,fmtDate(r.date,"mmm d, yyyy"),`${money(r.total,r.currency)} ${r.currency||"CAD"}`,num(r.taxPaid)?`GST/HST ${money(r.taxPaid,r.currency)}`:"",r.note||""].filter(Boolean).forEach((l,n)=>doc.text(String(l),M,TOP+20+n*18))}}
-  return{doc,originals:[]}}
+/* each receipt as its own PDF: the store's own PDF when the email had one, otherwise a one-page PDF of the photo or email */
+async function oneReceiptPdfs(r,base){
+  if(!r.hasImage&&r.gid&&S.mcp){try{const p=await emailParts(r.gid);if(p.pdfs.length)return p.pdfs.map((x,n)=>({b64:x.b64,name:`${base}${p.pdfs.length>1?` (${n+1})`:""}.pdf`}))}catch{}}
+  const v=await receiptVisual(r);
+  if(v.kind==="pdf"&&v.pdfs&&v.pdfs.length)return v.pdfs.map((x,n)=>({b64:x.b64,name:`${base}${v.pdfs.length>1?` (${n+1})`:""}.pdf`}));
+  await loadScript("https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js");const doc=new window.jspdf.jsPDF({unit:"pt",format:"letter"});rcPage(doc,r,v);
+  return[{b64:doc.output("datauristring").split(",")[1],name:`${base}.pdf`}]}
+const b64Blob=b=>new Blob([binToBytes(atob(b))],{type:"application/pdf"});
+const rcMailName=(r,k)=>`Receipt ${k+1} - ${fileBase(r.vendor)}`;
+const rcFileName=r=>`${r.date} ${fileBase(r.vendor)} receipt`;
+function receiptPdfEntry(r){return{label:`${r.vendor} · ${money(r.total,r.currency)} (PDF)`,make:async()=>(await oneReceiptPdfs(r,rcFileName(r))).map(f=>({blob:b64Blob(f.b64),name:f.name}))}}
 const rcCount=inv=>new Set((inv.items||[]).map(it=>it.rid).filter(Boolean)).size;
 
 
@@ -2318,7 +2330,7 @@ document.addEventListener("click",async e=>{
     case "rvCancel":{const id=S.review&&S.review.id;S.review=null;S.invViewId=id||S.invViewId;render(true);window.scrollTo({top:0});break}
     case "clearCheck":{const inv=S.invoices.find(i=>i.id===v);if(inv){await save({...inv,checkNotes:""});toast("Check notes cleared.")}break}
     case "delInv":if(S.armed!=="inv:"+v){arm("inv:"+v);break}S.armed=null;S.invViewId=null;await removeDoc(v,"invoice");toast("Invoice deleted.");break;
-    case "pdfRc":{const inv=S.invoices.find(i=>i.id===v);if(inv){receiptsPrintHTML(inv).then(printHTML)}break;try{toast("Building the receipts PDF…");const {doc:d,originals}=await buildReceiptsPdf(inv,{mode:S.rcMode==="best"?"snapshot":S.rcMode});if(d)await S.downloads.save({filename:`Receipts for ${pdfName(inv)}`,data:d.output("blob")})}catch(e){if(!(e&&e.code==="declined"))toast("Couldn't build the receipts PDF.")}break}
+    case "pdfRc":{const inv=S.invoices.find(i=>i.id===v);if(inv){receiptsPrintHTML(inv).then(printHTML)}break;startSave(`Receipts for #${inv.number}`,rcsOf(inv).map(({r})=>receiptPdfEntry(r)));break}
     case "gfindOpen":S.gfind={q:"",results:[],loading:false,busy:false,err:"",range:"any",token:"",seen:new Set()};S.picker=null;render(true);setTimeout(()=>{const q=$("#gf-q");if(q)q.focus()},50);break;
     case "gfindClose":S.gfind=null;render(true);break;
     case "gfindGo":gfindGo();break;
