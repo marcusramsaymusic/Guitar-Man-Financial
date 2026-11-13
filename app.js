@@ -406,13 +406,83 @@ function reimbWords(inv){const w=[];const add=x=>{if(!w.includes(x))w.push(x)};
   return w.length>1?w.filter(x=>x!=="expense"):w}
 const andList=a=>a.length<2?a.join(""):a.slice(0,-1).join(", ")+" and "+a[a.length-1];
 const theTopic=t=>/\b(show|gig|session|sessions|event|fest|festival|tour|run|date|weekend|rehearsals?)$/i.test(t)&&!/^(the|my|our|last)\b/i.test(t)?"the "+t:t;
-function mailSubject(inv){return `${mailTopic(inv)} ${isOverdue(inv)?"invoice":inv.status==="quote"?"quote":"invoice"}`.replace(/^\w/,c=>c.toUpperCase())}
-function defaultMailBody(inv){const hi=`Hey ${greetName(inv)}!`,t=mailTopic(inv),so=signOff();
+function baseSubject(inv){return `${mailTopic(inv)} ${isOverdue(inv)?"invoice":inv.status==="quote"?"quote":"invoice"}`.replace(/^\w/,c=>c.toUpperCase())}
+function baseBody(inv){const hi=`Hey ${greetName(inv)}!`,t=mailTopic(inv),so=signOff();
   if(isOverdue(inv)&&inv.status==="sent")return reminderBody(inv);
   if(inv.status==="quote")return `${hi}\n\nHere's my quote for ${t}. Let me know if it works!${so?"\n\n"+so:""}`;
   const rw=reimbWords(inv);const what=rw.length?`my bill and ${andList(rw)} reimbursement${rw.length>1||rw[0]==="expense"?"s":""}`:"the bill";
   return `${hi}\n\nSending over ${what} for ${theTopic(t)}. Thanks for having me!${so?"\n\n"+so:""}`}
 function reminderBody(inv){const t=invTotals(inv),so=signOff();return `Hey ${greetName(inv)}!\n\nJust following up on the ${mailTopic(inv).replace(/^the\s+/i,"")} invoice (#${inv.number}, ${money(t.total,inv.currency)}) from ${shortDate(inv.date)}. Attached it again. Let me know when I can expect it, thanks!${so?"\n\n"+so:""}`}
+
+function mailSubject(inv){const l=learnedFor(inv);const s=l&&fromStyle(l.subject,inv);return s?s.replace(/^\w/,c=>c.toUpperCase()):baseSubject(inv)}
+function defaultMailBody(inv){const l=learnedFor(inv);return (l&&fromStyle(l.body,inv))||baseBody(inv)}
+
+/* ———————————— learns how you write: your edits here, and what you actually sent from Gmail ———————————— */
+const styleKind=inv=>isOverdue(inv)&&inv.status==="sent"?"reminder":inv.status==="quote"?"quote":reimbWords(inv).length?"invoiceR":"invoice";
+function styleVars(inv){const t=invTotals(inv);return{name:greetName(inv),client:String(inv.client||"").trim(),topic:mailTopic(inv).replace(/^the\s+/i,""),number:String(inv.number||""),total:money(t.total,inv.currency),reimb:andList(reimbWords(inv)),date:shortDate(inv.date)}}
+const reEsc=s=>s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
+function toStyle(text,inv){let s=String(text||"").replace(/\r/g,"").trim();if(!s)return "";const v=styleVars(inv);
+  s=s.replace(/^((?:hey|hi|hello|dear|morning|good morning|yo)[ ,]+)([A-Za-zÀ-ÿ'’-]{2,})(?=[\s,!.])/i,(m,a,n)=>/^(there|all|team|everyone|folks)$/i.test(n)?m:a+"{name}");
+  const pairs=[["topic",v.topic],["client",v.client],["total",v.total],["total",v.total.replace(/\.00$/,"")],["reimb",v.reimb],["date",v.date],["name",v.name]].filter(([k,x])=>x&&x.length>=(k==="name"?2:3)&&!/^\{/.test(x));
+  pairs.sort((a,b)=>b[1].length-a[1].length).forEach(([k,x])=>{s=s.replace(new RegExp(`(^|[^A-Za-z0-9])${reEsc(x)}(?![A-Za-z0-9])`,"gi"),(m,p)=>p+`{${k}}`)});
+  if(v.number)s=s.replace(new RegExp(`(#\\s?|\\b(?:invoice|inv|bill|no\\.?)\\s*#?\\s?)${reEsc(v.number)}(?![\\d.,])`,"gi"),(m,p)=>p+"{number}");
+  return s}
+function fromStyle(tpl,inv){if(!tpl)return "";const v=styleVars(inv);if(/\{reimb\}/.test(tpl)&&!v.reimb)return "";
+  return tpl.replace(/\{(name|client|topic|number|total|reimb|date)\}/g,(m,k)=>v[k]||"")}
+const learnedFor=inv=>(S.settings.mailStyle||{})[styleKind(inv)]||null;
+async function learnStyle(inv,subject,body,from,at){
+  const k=styleKind(inv),st={...(S.settings.mailStyle||{})},prev=st[k]||{};at=at||Date.now();if(prev.at&&prev.at>at)return false;
+  const e={subject:toStyle(subject,inv)||prev.subject||"",body:toStyle(body,inv)||prev.body||"",at,from};
+  if(e.subject===prev.subject&&e.body===prev.body)return false;
+  st[k]=e;
+  if(k==="invoiceR"){const o=st.invoice||{};if(!o.at||o.at<at)st.invoice={subject:/\{reimb\}/.test(e.subject)?o.subject||"":e.subject,body:/\{reimb\}/.test(e.body)?o.body||"":e.body,at:o.body&&/\{reimb\}/.test(e.body)?o.at:at,from}}
+  if(k==="invoice"&&!/\{reimb\}/.test(e.subject)){const o=st.invoiceR||{};if(!o.at||o.at<at)st.invoiceR={...o,subject:e.subject,at:o.at||at,from:o.from||from}}
+  await save({...S.settings,kind:"settings",id:"settings",mailStyle:st},true);return true}
+/* the email's own text, without the Gmail signature or the quoted thread */
+function sentText(html,text){const S2=String(S.settings.businessName||"").trim(),tag=String(S.settings.tagline||"").trim(),em=String(S.settings.email||"").trim().toLowerCase();
+  let s="";if(html){const d=new DOMParser().parseFromString(html,"text/html");d.querySelectorAll(".gmail_signature,.gmail_signature_prefix,[data-smartmail],.gmail_quote,.gmail_extra,.gmail_attr,blockquote,style,script,title").forEach(n=>n.remove());
+    d.querySelectorAll("br").forEach(b=>b.replaceWith("\n"));d.querySelectorAll("div,p,li,tr,h1,h2,h3").forEach(b=>b.append("\n"));s=d.body?d.body.textContent:""}
+  else s=String(text||"").split(/\n-- ?\r?\n/)[0].split(/\n>/)[0];
+  s=s.replace(/\r/g,"").replace(/ /g," ").replace(/[ \t]+\n/g,"\n").split(/\n\s*On .{6,160}wrote:\s*\n/)[0];
+  const lines=s.split("\n");const cut=lines.findIndex((l,i)=>i>0&&(/^\s*--\s*$/.test(l)||(S2&&l.trim()===S2)||(tag&&l.trim()===tag)||(em&&l.toLowerCase().includes(em))||/^\s*(sent from my|get outlook)/i.test(l)));
+  return (cut>0?lines.slice(0,cut):lines).join("\n").replace(/\n{3,}/g,"\n\n").trim()}
+const sameText=(a,b)=>String(a||"").replace(/\s+/g," ").trim().toLowerCase()===String(b||"").replace(/\s+/g," ").trim().toLowerCase();
+/* finds the email you actually sent (it has this invoice's PDF attached) and learns from it */
+async function findSent(inv,sinceMs){const to=emailsIn(inv.clientEmail)[0];if(!to)return null;
+  const after=new Date(sinceMs-864e5),q=`in:sent to:${to} has:attachment after:${after.getFullYear()}/${after.getMonth()+1}/${after.getDate()}`;
+  const p=pl(await S.mcp.callTool("Gmail","search_threads",{query:q,pageSize:10},{cache:false}));
+  const msgs=[];(p.threads||[]).forEach(t=>(t.messages||[]).forEach(m=>{if((m.labelIds||[]).includes("SENT")&&!(m.labelIds||[]).includes("DRAFT"))msgs.push(m)}));
+  msgs.sort((a,b)=>String(a.date||"").localeCompare(String(b.date||"")));
+  const want=pdfName(inv).toLowerCase();
+  for(const m of msgs.slice(0,6)){try{const raw=pl(await S.mcp.callTool("Gmail","get_message",{messageId:m.id,messageFormat:"RAW"},{cache:false}));const r=raw.raw||raw.message&&raw.message.raw;if(!r)continue;
+    const rs=b64ToBin(r),leaves=mimeLeaves(rs);if(!leaves.some(l=>String(l.filename||"").toLowerCase()===want))continue;
+    const dec=l=>{try{return new TextDecoder(l.charset).decode(binToBytes(l.bin))}catch{return l.bin}};const h=leaves.find(l=>l.ct==="text/html"&&!l.filename),tx=leaves.find(l=>l.ct==="text/plain"&&!l.filename);
+    const d=Date.parse(mimeHeader(rs,"Date"))||Date.parse(m.date)||Date.now();
+    return{id:m.id,subject:mimeHeader(rs,"Subject"),body:sentText(h?dec(h):"",tx?dec(tx):""),at:d}}catch{}}
+  return null}
+let learnBusy=false,learnLast=0;
+async function learnFromSent(){if(learnBusy||!S.mcp||!gmailOn()||Date.now()-learnLast<10*60e3)return;learnBusy=true;learnLast=Date.now();
+  try{const now=Date.now();
+    let todo=S.invoices.filter(i=>i.mailSent&&i.mailSent.learn&&now-i.mailSent.at<21*864e5).sort((a,b)=>a.mailSent.at-b.mailSent.at).slice(0,3);
+    const seed=!S.settings.mailStyleSeeded&&!todo.length;
+    if(seed)todo=S.invoices.filter(i=>/sent|paid/.test(i.status)&&emailsIn(i.clientEmail).length&&i.date).sort((a,b)=>b.date.localeCompare(a.date)).slice(0,3).reverse();
+    let learned=0;
+    for(const inv of todo){const since=inv.mailSent?inv.mailSent.at:Date.parse(inv.date+"T00:00:00");const got=await findSent(inv,since).catch(()=>null);
+      const cur=S.invoices.find(i=>i.id===inv.id);
+      if(got){const ms=cur.mailSent||{};const changed=!ms.body||!sameText(got.body,ms.body)||!sameText(got.subject,ms.subject);
+        if(changed&&got.body&&await learnStyle(seed?{...cur,status:"draft"}:{...cur,status:ms.kind==="reminder"?"sent":ms.kind==="quote"?"quote":"draft"},got.subject,got.body,"gmail",got.at))learned++;
+        if(cur.mailSent)await save({...cur,mailSent:{...ms,learn:false,sentId:got.id}},true)}
+      else if(cur.mailSent&&now-cur.mailSent.at>21*864e5)await save({...cur,mailSent:{...cur.mailSent,learn:false}},true)}
+    if(seed)await save({...S.settings,kind:"settings",id:"settings",mailStyleSeeded:today()},true);
+    if(learned){if(S.invViewId&&S.mailFor===S.invViewId){const inv=S.invoices.find(i=>i.id===S.invViewId);if(inv&&!S.mailEdited){S.mailBody=defaultMailBody(inv);S.mailSubj=mailSubject(inv)}}render()}}
+  finally{learnBusy=false}}
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")setTimeout(learnFromSent,3000)});
+const STYLE_WORDS={name:"their name",client:"client",topic:"what it's for",number:"number",total:"total",reimb:"expenses",date:"date"};
+const styleShow=s=>esc(s).replace(/\{(name|client|topic|number|total|reimb|date)\}/g,(m,k)=>`<span class="chip" style="padding:0 6px;font-size:12.5px;text-transform:none;letter-spacing:0;font-family:inherit">${STYLE_WORDS[k]}</span>`);
+function styleSection(){const st=S.settings.mailStyle||{};const rows=[["invoice","Invoice"],["invoiceR","Invoice with reimbursements"],["quote","Quote"],["reminder","Reminder"]].filter(([k])=>st[k]&&(st[k].body||st[k].subject));
+  return `<section class="panel" style="max-width:640px"><div class="label">How your emails sound</div>
+<p class="note" style="margin:6px 0 10px">The app copies how you word your invoice emails and subject lines. ${OFFLINE?"It learns from the changes you make to the subject and message.":"It learns from changes you make before you hit Create draft, and from the email you actually send from Gmail."}</p>
+${rows.length?rows.map(([k,n])=>`<div class="rowline" style="align-items:flex-start"><span style="min-width:0"><b>${n}</b> <span class="dim">· from ${st[k].from==="gmail"?"your sent email":"your edits"}, ${esc(shortDate(new Date(st[k].at).toISOString().slice(0,10)))}</span><br><span class="note">Subject: ${st[k].subject?styleShow(st[k].subject):"(default)"}</span><br><span class="note" style="white-space:pre-wrap">${st[k].body?styleShow(st[k].body):"(default)"}</span></span><button class="btn sm ghost" data-act="styleForget" data-v="${k}">Forget</button></div>`).join(""):`<p class="note" style="margin:0">Nothing learned yet. It uses the default wording until you change one or send one.</p>`}</section>`}
 
 /* ———————————— the Gmail draft keeps trying in the background ———————————— */
 const MAIL_WAIT=[0,15,30,60,120,180,300,300,600];
@@ -422,7 +492,7 @@ async function buildMailArgs(inv){
   const to=[...new Set((String(inv.clientEmail||"").match(/[^@\s<>"',;]+@[^@\s<>"',;]+\.[a-z]{2,}/gi)||[]).map(x=>x.toLowerCase()))];
   const doc=await buildInvoicePdf(inv);const atts=[{content:doc.output("datauristring").split(",")[1],filename:pdfName(inv),mimeType:"application/pdf"}];
   let nrc=0;if(S.attachRc!==false){for(const [k,{r}] of rcsOf(inv).entries()){const fs=await oneReceiptPdfs(r,rcMailName(r,k));fs.forEach(f=>atts.push({content:f.b64,filename:f.name,mimeType:"application/pdf"}));if(fs.length)nrc++}}
-  return{args:{to,subject:mailSubject(inv),body:S.mailFor===inv.id&&S.mailBody?S.mailBody:defaultMailBody(inv),attachments:atts,includeSignature:true},nrc}}
+  return{args:{to,subject:S.mailFor===inv.id&&S.mailSubj?S.mailSubj.trim():mailSubject(inv),body:S.mailFor===inv.id&&S.mailBody?S.mailBody:defaultMailBody(inv),attachments:atts,includeSignature:true},nrc}}
 async function draftAlreadyThere(j){try{const q=`to:${j.args.to[0]} subject:(${j.args.subject.replace(/[()"]/g," ")}) newer_than:2d`;const p=pl(await withTimeout(S.mcp.callTool("Gmail","list_drafts",{query:q,pageSize:5},{cache:false}),30000));return !!((p.drafts||[]).length)}catch{return false}}
 async function emailInvoice(inv){
   if(!S.mcp){S.invMail="err:Gmail isn't available here. Open the app in Claude.";render();return}
@@ -430,7 +500,8 @@ async function emailInvoice(inv){
   if(S.mailJob&&!S.mailJob.done){toast("Still working on the last draft.");return}
   S.busy.mail=true;S.invMail="";render();
   let built;try{built=await buildMailArgs(inv)}catch(e){S.busy.mail=false;S.invMail="err:"+(e&&e.message==="load"?"Couldn't load the PDF maker. Check your connection.":"Couldn't make the PDF.");render();return}
-  S.mailJob={invId:inv.id,args:built.args,nrc:built.nrc,attempt:0,state:"sending",done:false};
+  S.mailJob={invId:inv.id,args:built.args,nrc:built.nrc,attempt:0,state:"sending",done:false,kind:styleKind(inv)};
+  if(!sameText(built.args.body,defaultMailBody(inv))||!sameText(built.args.subject,mailSubject(inv)))learnStyle(inv,built.args.subject,built.args.body,"app").catch(()=>{});
   const cur=S.invoices.find(i=>i.id===inv.id);if(cur)save({...cur,mailPending:{at:Date.now(),to:built.args.to,subject:built.args.subject,body:built.args.body}},true);
   runMailJob()}
 async function runMailJob(){const j=S.mailJob;if(!j||j.done||j.running)return;j.running=true;j.attempt++;
@@ -445,7 +516,7 @@ async function runMailJob(){const j=S.mailJob;if(!j||j.done||j.running)return;j.
   j.running=false}
 async function mailDone(j){j.done=true;j.running=false;j.state="done";S.busy.mail=false;
   S.invMail=`ok:The draft${j.nrc?` with ${j.nrc} receipt${j.nrc===1?"":"s"}`:""} is in your Gmail drafts.`;
-  const cur=S.invoices.find(i=>i.id===j.invId);if(cur){const upd={...cur,mailPending:null};if(cur.status==="draft")upd.status="sent";await save(upd,true);if(cur.status==="draft")autoBackupInv(cur.id)}
+  const cur=S.invoices.find(i=>i.id===j.invId);if(cur){const upd={...cur,mailPending:null,mailSent:{at:Date.now(),subject:j.args.subject,body:j.args.body,kind:j.kind,learn:true}};if(cur.status==="draft")upd.status="sent";await save(upd,true);if(cur.status==="draft")autoBackupInv(cur.id)}
   toast(`Gmail draft ready: ${j.args.subject}`);mailDraw();render()}
 function mailDraw(){let el=$("#mailPill");const j=S.mailJob;
   if(!j||j.state==="done"||j.state==="failed"){if(el)el.remove();return}
@@ -454,7 +525,7 @@ function mailDraw(){let el=$("#mailPill");const j=S.mailJob;
   el.innerHTML=`<span class="spin"></span><span>${j.state==="waiting"?`Gmail's slow. Trying again in ${secs}s (try ${j.attempt+1})`:j.state==="checking"?"Checking your Gmail drafts…":j.attempt>1?`Sending to Gmail (try ${j.attempt})…`:"Sending to Gmail…"}</span>${j.state==="waiting"?`<button class="btn sm ghost" data-act="mailNow">Now</button>`:""}<button class="btn sm ghost" data-act="mailStop">Stop</button>`;
   if(j.state==="waiting"){clearTimeout(j.tick);j.tick=setTimeout(mailDraw,1000)}}
 function resumeMailJobs(){if(S.mailJob||!S.mcp)return;const inv=S.invoices.find(i=>i.mailPending&&Date.now()-i.mailPending.at<36*3600e3);if(!inv)return;
-  S.mailFor=inv.id;S.mailBody=inv.mailPending.body||"";emailInvoice({...inv,clientEmail:(inv.mailPending.to||[]).join(", ")||inv.clientEmail})}
+  S.mailFor=inv.id;S.mailBody=inv.mailPending.body||"";S.mailSubj=inv.mailPending.subject||"";emailInvoice({...inv,clientEmail:(inv.mailPending.to||[]).join(", ")||inv.clientEmail})}
 
 /* ———————————— what a receipt looks like when it goes out: photo, the receipt PDF, or a crop of the email ———————————— */
 function mimeHeader(raw,name){const k=raw.search(/\r?\n\r?\n/);const head=(k<0?raw:raw.slice(0,k)).replace(/\r?\n[ \t]+/g," ");const m=head.match(new RegExp("^"+name+":\\s*(.*)$","im"));if(!m)return "";
@@ -519,7 +590,7 @@ async function buildPacketHTML(inv){
   const dl=(b64,name)=>b64?`<a class="dl" download="${esc(name)}" href="data:application/pdf;base64,${b64}">⬇ ${esc(name)}</a>`:"";
   let html=`<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Ready to send: ${esc(docTitle(inv))} ${esc(inv.number)} ${esc(inv.client)}</title><style>${SHEET_CSS}${TPL_CSS}
 .box{background:#fff;border-radius:6px;padding:16px;margin:14px 0;font:14px Arial,sans-serif;color:#222}.box pre{white-space:pre-wrap;font:14px Arial,sans-serif;background:#f6f6f6;padding:10px;border-radius:4px}.dl{display:inline-block;margin:4px 8px 4px 0;padding:8px 12px;background:#1f2a44;color:#fff;border-radius:4px;text-decoration:none;font:14px Arial}.rc img{max-width:100%;border:1px solid #ddd}.rc h3{margin:0 0 4px}.sm{color:#666;font-size:13px;margin:0 0 8px}</style></head><body><div class="wrapx">
-<div class="box"><b>Ready to send</b> · saved by Guitar Man Finance on ${today()}<br>To: ${esc(to||"(add the client's email)")}<br>Subject: ${esc(mailSubject(inv))}<pre>${esc(body)}</pre>
+<div class="box"><b>Ready to send</b> · saved by Guitar Man Finance on ${today()}<br>To: ${esc(to||"(add the client's email)")}<br>Subject: ${esc(S.mailFor===inv.id&&S.mailSubj?S.mailSubj:mailSubject(inv))}<pre>${esc(body)}</pre>
 <div>${dl(invB64,pdfName(inv))}${dl(rcB64,`Receipts for ${pdfName(inv)}`)}${originals.map(o=>dl(o.content,o.filename)).join("")}</div>
 <p class="sm">Tap a button to save that PDF, then attach them to an email to ${esc(inv.client)}.</p></div>
 ${sheetHTML(inv)}
@@ -1025,7 +1096,7 @@ function renderChrome(){
   $("#tabs").innerHTML=tabs.map(([k,l])=>`<button class="plaque ${S.tab===k?"":"off"}" data-act="tab" data-v="${k}" aria-current="${S.tab===k}">${l}</button>`).join("");
 }
 let mailResumed=false;
-function render(force){setTimeout(backDraw,0);if(!mailResumed&&S.mcp&&S.invoices.length){mailResumed=true;setTimeout(resumeMailJobs,2500)}renderChrome();if(!force&&editingNow())return;$("#view").innerHTML=({dashboard:vDash,invoices:vInvoices,receipts:vReceipts,mileage:vMileage,gst:vGst,other:vOther,reports:vReports,settings:vSettings}[S.tab]||vDash)()+(S.tab==="dashboard"&&themeNow()==="acdc"?setlist():"");acdcize($("#view"))}
+function render(force){setTimeout(backDraw,0);if(!mailResumed&&S.mcp&&S.invoices.length){mailResumed=true;setTimeout(resumeMailJobs,2500);setTimeout(learnFromSent,6000)}renderChrome();if(!force&&editingNow())return;$("#view").innerHTML=({dashboard:vDash,invoices:vInvoices,receipts:vReceipts,mileage:vMileage,gst:vGst,other:vOther,reports:vReports,settings:vSettings}[S.tab]||vDash)()+(S.tab==="dashboard"&&themeNow()==="acdc"?setlist():"");acdcize($("#view"))}
 function msgLine(m){if(!m)return"";const [k,...r]=m.split(":");return `<div class="${k==="ok"?"ok":"err"}">${esc(r.join(":"))}</div>`}
 function years(){const ys=new Set([new Date().getFullYear()]);S.invoices.forEach(i=>ys.add(yearOf(i.date)));S.receipts.forEach(r=>ys.add(yearOf(r.date)));return[...ys].sort((a,b)=>b-a)}
 function yearPicker(){return `<div class="row" role="group" aria-label="Year">${years().map(y=>`<button class="btn sm ${y===S.year?"gold":"ghost"}" data-act="year" data-v="${y}">${y}</button>`).join("")}</div>`}
@@ -1764,7 +1835,7 @@ async function backupAllInvoices(){
 }
 function vInvView(inv){
   const t=invTotals(inv),s=S.settings;const arm=S.armed==="inv:"+inv.id;
-  if(S.mailFor!==inv.id){S.mailFor=inv.id;S.mailBody=defaultMailBody(inv)}
+  if(S.mailFor!==inv.id){S.mailFor=inv.id;S.mailBody=defaultMailBody(inv);S.mailSubj=mailSubject(inv);S.mailEdited=false}
   if(rcCount(inv))setTimeout(()=>loadAttPreview(inv),0);
   const bill=[inv.client,...String(inv.clientAddress||"").split("\n")].filter(Boolean);
   return `<div class="row"><button class="btn ghost" data-act="backInv">← Invoices</button>
@@ -1785,8 +1856,8 @@ ${sheetHTML(inv)}
 <section class="panel">
 <div class="row" style="justify-content:space-between"><div class="label">Send it</div>${rbStatus(inv)}</div>
 <div class="field" style="margin-top:8px"><label class="label" for="mail-to">To</label><input id="mail-to" value="${esc(inv._to??inv.clientEmail)}" data-mailto="${inv.id}" autocomplete="off" autocapitalize="off" spellcheck="false" inputmode="email" placeholder="Tap for suggestions"><div class="sugg" id="sugg-mailto"></div></div>
-<div class="note" style="margin-top:8px">Subject: <b>${esc(mailSubject(inv))}</b></div>
-<div class="field" style="margin-top:6px"><label class="label" for="mail-body">Message</label><textarea id="mail-body" data-bind="mailBody" style="min-height:110px">${esc(S.mailBody)}</textarea></div>
+<div class="field" style="margin-top:8px"><label class="label" for="mail-subj">Subject</label><input id="mail-subj" data-bind="mailSubj" data-mailedit="1" value="${esc(S.mailSubj)}"></div>
+<div class="field" style="margin-top:6px"><label class="label" for="mail-body">Message</label><textarea id="mail-body" data-bind="mailBody" data-mailedit="1" style="min-height:110px">${esc(S.mailBody)}</textarea></div>${learnedFor(inv)?`<div class="note" style="margin-top:4px">Worded like your last ${styleKind(inv)==="reminder"?"reminder":styleKind(inv)==="quote"?"quote":"invoice"} email.</div>`:""}
 ${rcCount(inv)?`<label class="chk" style="margin-top:8px"><input type="checkbox" data-attachrc="1" ${S.attachRc!==false?"checked":""}> Attach the ${rcCount(inv)} receipt${rcCount(inv)===1?"":"s"}</label>`:""}
 <div id="attBox">${attPreviewHTML(inv)}</div>
 <div class="row" style="margin-top:10px">${gmailOn()?`<button class="btn gold" data-act="mail" data-v="${inv.id}" ${S.busy.mail?"disabled":""}>${S.busy.mail?'<span class="spin"></span> Making the Gmail draft…':ICON.mail+(isOverdue(inv)?"Create reminder draft with PDF":"Create Gmail draft with PDF")}</button>`:`<button class="btn gold" data-act="dlAll" data-v="${inv.id}">Print / save as PDF</button><button class="btn" data-act="copyMsg">Copy the message</button>`}</div>${gmailOn()?"":`<p class="note" style="margin-top:6px">Print or save the PDF (on a phone: Share › Print, then pinch to save as PDF), copy the message, and send it from your own email app.</p>`}
@@ -2156,6 +2227,7 @@ ${vCustomize()}
 <p class="note" style="margin:6px 0 10px">${OFFLINE?"Load a backup file (.json) you saved from this app before, on this device or another one.":"Load a books backup file (.json) from Dropbox › Guitar Man Finance › Backups."}</p>
 <label tabindex="0" role="button" class="btn" for="jsonIn">${ICON.up}Load backup file</label>${msgLine(S.msg.import)}</section>
 
+${styleSection()}
 ${streamsSettings()}
 ${privacySection()}`;
 }
@@ -2226,6 +2298,7 @@ document.addEventListener("input",e=>{
   const el=e.target;
   if(el.dataset&&el.dataset.search){S.recSearch=el.value;clearTimeout(searchT);searchT=setTimeout(()=>{const pos=el.selectionStart;render(true);const n=$("#recSearch");if(n){n.focus();try{n.setSelectionRange(pos,pos)}catch{}}},250);return}
   if(el.dataset&&el.dataset.mailto){const inv=S.invoices.find(i=>i.id===el.dataset.mailto);if(inv)inv._to=el.value;queueSuggest();return}
+  if(el.dataset&&el.dataset.mailedit)S.mailEdited=true;
   const p=el.dataset&&el.dataset.bind;if(!p)return;
   setPath(p,el.value);
   if(p.startsWith("sf."))S.sfDirty=true;
@@ -2320,6 +2393,7 @@ document.addEventListener("click",async e=>{
       render(true);window.scrollTo({top:0});autoBackupInv(doc.id);break}
     case "status":{const inv=S.invoices.find(i=>i.id===v);if(inv){await save({...inv,status:b.dataset.s});toast(b.dataset.s==="paid"?`#${inv.number} marked paid.`:"Marked "+b.dataset.s+".");autoBackupInv(inv.id);if(b.dataset.s==="paid"&&S.invViewId===inv.id)goBack()}break}
     case "mailNow":if(S.mailJob&&S.mailJob.state==="waiting"){clearTimeout(S.mailJob.timer);S.mailJob.running=false;runMailJob()}break;
+    case "styleForget":{const st={...(S.settings.mailStyle||{})};delete st[v];await save({...S.settings,kind:"settings",id:"settings",mailStyle:st},true);if(S.invViewId){S.mailFor=null}toast("Back to the default wording for that one.");render(true);break}
     case "mailStop":if(S.mailJob){clearTimeout(S.mailJob.timer);const j=S.mailJob;j.done=true;j.state="failed";S.busy.mail=false;S.invMail="err:Stopped. Check your Gmail drafts before trying again.";const cur=S.invoices.find(i=>i.id===j.invId);if(cur&&cur.mailPending)save({...cur,mailPending:null},true);mailDraw();render(true)}break;
     case "attOpen":{const v2=S.attPrev&&S.attPrev.v[v];const r=S.receipts.find(x=>x.id===v);if(v2&&v2.url)lightbox(v2.url,r?`${r.vendor} · ${money(r.total,r.currency)}`:"");break}
     case "lbClose":{const el=$("#lbRoot");if(el)el.innerHTML="";backDraw();break}
@@ -2418,7 +2492,7 @@ document.addEventListener("click",async e=>{
     case "useFix":{const it=S.invEdit&&S.invEdit.items[Number(v)];if(it&&it.fix){it.desc=it.fix;it._checked=it.fix;it.fix="";const d=$("#ie-d"+v);if(d)d.value=it.desc;onLineDesc(Number(v))}break}
     case "noFix":{const it=S.invEdit&&S.invEdit.items[Number(v)];if(it){it.fix="";it._checked=it.desc;const h=$("#ie-h"+v);if(h)h.innerHTML=lineHint(it)}break}
     case "setTheme":{if(!THEMES.some(x=>x[0]===v))break;S.settings.theme=v;applyTheme();const box=document.getElementById("logoBox");if(box)box.dataset.cur="";render(true);save({...S.settings,kind:"settings",id:"settings",theme:v},true);break}
-    case "copyMsg":{const txt=$("#mail-body")?$("#mail-body").value:"";try{await navigator.clipboard.writeText(txt);toast("Message copied.")}catch{const ta=$("#mail-body");if(ta){ta.focus();ta.select()}toast("Select the message and copy it.")}break}
+    case "copyMsg":{const txt=$("#mail-body")?$("#mail-body").value:"";{const inv=S.invoices.find(i=>i.id===S.invViewId);const sj=$("#mail-subj")?$("#mail-subj").value:"";if(inv&&txt&&(!sameText(txt,defaultMailBody(inv))||!sameText(sj,mailSubject(inv))))learnStyle(inv,sj,txt,"app").catch(()=>{})}try{await navigator.clipboard.writeText(txt);toast("Message copied.")}catch{const ta=$("#mail-body");if(ta){ta.focus();ta.select()}toast("Select the message and copy it.")}break}
     case "setInteg":{const [k,val]=v.split(":");save({...S.settings,kind:"settings",id:"settings",[k]:val==="on"},true).then(()=>render(true));S.settings[k]=val==="on";render(true);break}
     case "streamAdd":{const nf=S.newStream||{name:"",type:"business"};const name=cleanText(nf.name);if(!name){toast("Give the income stream a name.");break}const streams=[...(S.settings.streams||[]),{id:"st_"+newId(),name:name.slice(0,40),type:nf.type||"business"}];S.newStream=null;S.streamsOpen=true;await save({...S.settings,kind:"settings",id:"settings",streams},true);toast(`${name} added. Find it under the Other income tab.`);render(true);break}
     case "streamDel":if(S.armed!=="stream:"+v){arm("stream:"+v);break}S.armed=null;{const streams=(S.settings.streams||[]).filter(x=>x.id!==v);await save({...S.settings,kind:"settings",id:"settings",streams},true);render(true)}break;
