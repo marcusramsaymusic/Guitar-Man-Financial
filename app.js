@@ -1387,13 +1387,17 @@ async function dbxUpload(str){const r=await fetch("https://content.dropboxapi.co
 async function dbxDownload(){const r=await fetch("https://content.dropboxapi.com/2/files/download",{method:"POST",headers:{Authorization:"Bearer "+await dbxToken(),"Dropbox-API-Arg":JSON.stringify({path:DBX_PATH})}});if(r.status===409)return null;if(!r.ok)throw new Error("Couldn't download from Dropbox ("+r.status+").");return r.text()}
 async function dbxDelete(){const r=await fetch("https://api.dropboxapi.com/2/files/delete_v2",{method:"POST",headers:{Authorization:"Bearer "+await dbxToken(),"Content-Type":"application/json"},body:JSON.stringify({path:DBX_PATH})});if(!r.ok&&r.status!==409)throw new Error("Couldn't delete the Dropbox copy.")}
 /* shared */
+/* when the cloud doesn't answer, keep trying: 15s, 30s, 1m, 2m, 5m, 10m, then every 30m */
+const CLOUD_WAIT=[15,30,60,120,300,600,1800];let cloudTries=0;
 async function cloudBackupNow(manual){
   if(!CLOUD.provider||CLOUD.relink)return;if(cloudBusy){cloudPending=true;return}
   if(!manual&&(CLOUD.conflict||!(await hasBooksDB())))return;
   if(CLOUD.encrypt&&!cloudKey){CLOUD.lastErr="Your cloud backup is locked. Enter your passphrase in Settings › Privacy to keep backing up.";redrawSoon();return}
   cloudBusy=true;CLOUD.lastErr="";if(manual)redrawSoon();
   try{const str=await sealData(JSON.stringify(await backupObj()));if(CLOUD.provider==="google")await gUpload(str,manual);else await dbxUpload(str);CLOUD.lastSync=new Date().toISOString();CLOUD.dirty=false;CLOUD.conflict=false;if(manual)toast(`Backed up to your ${cloudName()}.`)}
-  catch(e){CLOUD.lastErr=(e&&e.message)||"The backup didn't finish."}
+  catch(e){CLOUD.lastErr=(e&&e.message)||"The backup didn't finish.";const n=Math.min(cloudTries++,CLOUD_WAIT.length-1);
+    if(!CLOUD.relink&&cloudTries<=12){CLOUD.lastErr+=` Trying again in ${CLOUD_WAIT[n]<90?CLOUD_WAIT[n]+"s":Math.round(CLOUD_WAIT[n]/60)+" min"}.`;clearTimeout(cloudTimer);cloudTimer=setTimeout(()=>cloudBackupNow(false),CLOUD_WAIT[n]*1000)}}
+  if(!CLOUD.lastErr)cloudTries=0;
   await cloudPersist();cloudBusy=false;redrawSoon();if(cloudPending){cloudPending=false;cloudDirty()}
 }
 /* also backs up when you leave the app, and at least once a week */
