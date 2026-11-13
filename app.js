@@ -62,6 +62,7 @@ const S={
 
 /* ———————————— capability boot ———————————— */
 const use=n=>(window.claude&&window.claude.use)?window.claude.use(n).catch(()=>null):Promise.resolve(null);
+let bkFirst=true;
 const IDB={db:null,
   open(){return new Promise((res,rej)=>{let r;try{r=indexedDB.open("guitar-man-finance-offline",1)}catch(e){rej(e);return}r.onupgradeneeded=()=>r.result.createObjectStore("docs");r.onsuccess=()=>{this.db=r.result;res()};r.onerror=()=>rej(r.error)})},
   st(m){return this.db.transaction("docs",m).objectStore("docs")},
@@ -355,18 +356,60 @@ async function backupAll(){
   toast(b.err?b.err:`Dropbox backup: ${b.done-b.failed} saved${b.failed?`, ${b.failed} failed (tap Retry on those)`:""}${b.stop?" — stopped early":""}.`);
   render(true);
 }
-async function backupLedger(){
-  if(!S.mcp){toast("Connected apps aren't available in this view. Open the page in Claude.");return}
-  S.busy.ledger=true;S.msg.ledger="";render();
+/* ———————————— books backup to Dropbox: after every session and at least weekly; old copies get cleaned up ———————————— */
+const BK_KEEP=7,BK_WEEK=7*864e5,BK_IDLE=120e3;
+function bkSettings(){const {bkAt,bkSig,bkErr,bkPhotos,bkPruned,kind,id,...s}=S.settings;return s}
+function booksData(){return{app:"Guitar Man Finance",exported:new Date().toISOString(),settings:bkSettings(),invoices:S.invoices,receipts:S.receipts,trips:S.trips,incomes:S.incomes}}
+function strHash(s){let h=2166136261>>>0;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)>>>0}return h.toString(36)+"."+s.length.toString(36)}
+const booksSig=()=>strHash(JSON.stringify({s:bkSettings(),i:S.invoices,r:S.receipts,t:S.trips,n:S.incomes}));
+let bkBusy=false,bkAgain=false,bkTimer=null,bkWarned=false;
+function bkSoon(ms){if(!dropboxOn()||!S.persist)return;clearTimeout(bkTimer);bkTimer=setTimeout(()=>booksBackup("auto"),ms)}
+const bkPending=()=>dropboxOn()&&S.persist&&(booksSig()!==S.settings.bkSig||Date.now()-(S.settings.bkAt||0)>BK_WEEK||S.receipts.some(r=>r.hasImage&&!(S.settings.bkPhotos||[]).includes(r.id)));
+async function booksBackup(why){
+  if(!dropboxOn()||!S.persist||!S.booted)return false;
+  if(bkBusy){bkAgain=true;return false}
+  const manual=why==="manual",sig=booksSig(),stale=Date.now()-(S.settings.bkAt||0)>BK_WEEK;
+  const done=new Set(S.settings.bkPhotos||[]);const photos=S.receipts.filter(r=>r.hasImage&&!done.has(r.id));
+  if(!manual&&sig===S.settings.bkSig&&!stale&&!photos.length)return true;
+  bkBusy=true;if(manual){S.busy.ledger=true;S.msg.ledger="";render()}
   try{
-    const stamp=new Date().toISOString().slice(0,16).replace(/[:T]/g,"-");
-    await ensureFolders([ROOT,ROOT+"/Backups"]);
-    await dbxCreate(`${ROOT}/Backups/books-${stamp}.json`,JSON.stringify({exported:new Date().toISOString(),settings:S.settings,invoices:S.invoices,receipts:S.receipts},null,1));
-    await dbxCreate(`${ROOT}/Backups/summary-${S.year}-${stamp}.html`,summaryHTML(S.year));
-    S.msg.ledger="ok:Books and the "+S.year+" summary are in Dropbox › Guitar Man Finance › Backups.";
-  }catch(e){S.msg.ledger="err:"+mcpErr(e,"Dropbox")}
-  S.busy.ledger=false;render();
-}
+    const stamp=new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
+    await ensureFolders([ROOT,ROOT+"/Backups",ROOT+"/Backups/Photos"]);
+    if(manual||sig!==S.settings.bkSig||stale){
+      await dbxCreate(`${ROOT}/Backups/books-${stamp}.json`,JSON.stringify(booksData(),null,1));
+      await dbxCreate(`${ROOT}/Backups/summary-${S.year}-${stamp}.html`,summaryHTML(S.year))}
+    for(const r of photos.slice(0,40)){const u=await getImage(r.id);if(!u){done.add(r.id);continue}
+      if(u.length<4.8e6)await dbxCreate(`${ROOT}/Backups/Photos/${r.date||"undated"} ${safeName(r.vendor)} ${r.id}.json`,JSON.stringify({app:"Guitar Man Finance",kind:"photo",images:{[r.id]:u}}));done.add(r.id)}
+    const ids=new Set(S.receipts.map(r=>r.id));
+    await save({...S.settings,kind:"settings",id:"settings",bkAt:Date.now(),bkSig:sig,bkErr:"",bkPhotos:[...done].filter(x=>ids.has(x))},true);
+    await bkPrune().catch(()=>{});
+    if(manual)S.msg.ledger="ok:Backed up. Your books are in Dropbox › Guitar Man Finance › Backups.";
+    return true}
+  catch(e){const m=mcpErr(e,"Dropbox");if(S.settings.bkErr!==m)save({...S.settings,kind:"settings",id:"settings",bkErr:m},true);
+    if(manual)S.msg.ledger="err:"+m;else if(!bkWarned){bkWarned=true;toast("Dropbox backup didn't go through. It'll try again next time.")}
+    return false}
+  finally{bkBusy=false;if(manual)S.busy.ledger=false;render();if(bkAgain){bkAgain=false;bkSoon(15e3)}}}
+async function dbxList(path){const out=[];let p=pl(await S.mcp.callTool("Dropbox","list_folder",{path,recursive:false,object_types:["file"],max_results:600},{cache:false}));
+  for(let n=0;n<10;n++){out.push(...(p.entries||[]));if(!p.has_more||!p.cursor)break;p=pl(await S.mcp.callTool("Dropbox","list_folder",{cursor:p.cursor},{cache:false}))}return out}
+/* keeps the newest 7 books backups plus the newest one from each of the last 12 months, the newest summary per year, and photos of receipts you still have. Deleted copies go to Dropbox's Deleted files. */
+async function bkPrune(){
+  const files=await dbxList(ROOT+"/Backups");const kill=[];
+  const books=files.filter(f=>/^books-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}(-\d{2})?\.json$/.test(f.name)).sort((a,b)=>b.name.localeCompare(a.name));
+  const months=new Set();books.forEach((f,k)=>{const mo=f.name.slice(6,13);if(k<BK_KEEP){months.add(mo);return}if(!months.has(mo)&&months.size<12){months.add(mo);return}kill.push(f)});
+  const years=new Set();files.filter(f=>/^summary-\d{4}-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}(-\d{2})?\.html$/.test(f.name)).sort((a,b)=>b.name.slice(13).localeCompare(a.name.slice(13))).forEach(f=>{const y=f.name.slice(8,12);if(years.has(y))kill.push(f);else years.add(y)});
+  if(S.receipts.length){const ids=new Set(S.receipts.map(r=>r.id));const ph=await dbxList(ROOT+"/Backups/Photos");
+    ph.forEach(f=>{const m=f.name.match(/ ([A-Za-z0-9_-]{6,})\.json$/);if(m&&!ids.has(m[1]))kill.push(f)})}
+  if(kill.length)await S.mcp.callTool("Dropbox","delete",{entries:kill.slice(0,200).map(f=>({source_path:f.path_display||f.path}))});
+  if(kill.length)save({...S.settings,kind:"settings",id:"settings",bkPruned:{at:Date.now(),n:kill.length}},true);
+  return kill.length}
+function bkStatus(){if(!dropboxOn())return "";const s=S.settings;
+  if(bkBusy)return `<span class="note"><span class="spin"></span> Backing up to Dropbox…</span>`;
+  if(s.bkErr)return `<span class="note red">Dropbox backup failed: ${esc(s.bkErr)}</span>`;
+  return s.bkAt?`<span class="note">Backed up to Dropbox ${esc(ago2(s.bkAt))}${booksSig()===s.bkSig?"":" · changes waiting"}</span>`:`<span class="note">Not backed up to Dropbox yet</span>`}
+function ago2(t){const m=(Date.now()-t)/6e4;return m<1.5?"just now":m<60?Math.round(m)+" min ago":m<36*60?Math.round(m/60)+" h ago":Math.round(m/1440)+" days ago"}
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="hidden"&&bkPending()){clearTimeout(bkTimer);booksBackup("leave")}});
+window.addEventListener("pagehide",()=>{if(bkPending()){clearTimeout(bkTimer);booksBackup("leave")}});
+async function backupLedger(){return booksBackup("manual")}
 
 /* ———————————— invoices ———————————— */
 function nextNumber(){const n=Math.max(0,...S.invoices.map(i=>parseInt(i.number,10)).filter(x=>isFinite(x)&&x<100000));return String(n+1)}
@@ -1146,8 +1189,8 @@ function vDash0(st){
   return `${reviewBanners()}${gmailCard()}${billLaterPanel()}<div class="row">${yearPicker()}</div>
 <div class="row">
   <button class="btn sm" data-act="pdf" ${S.busy.pdf?"disabled":""}>${S.busy.pdf?'<span class="spin"></span> Building PDF…':"Print year-end report"}</button>
-  ${dropboxOn()?`<button class="btn sm" data-act="ledger" ${S.busy.ledger?"disabled":""}>${S.busy.ledger?'<span class="spin"></span> Backing up…':"Back up books to Dropbox"}</button>`:""}
-</div>${msgLine(S.msg.pdf)}${msgLine(S.msg.ledger)}
+  ${dropboxOn()?`<button class="btn sm" data-act="ledger" ${S.busy.ledger?"disabled":""}>${S.busy.ledger?'<span class="spin"></span> Backing up…':"Back up now"}</button>`:""}
+</div>${dropboxOn()&&!S.msg.ledger?`<div>${bkStatus()}</div>`:""}${msgLine(S.msg.pdf)}${msgLine(S.msg.ledger)}
 ${goal?`<div class="panel"><div class="row" style="justify-content:space-between"><span class="label">${S.year} income goal</span><span class="mono">${money(st.payB)} of ${money(goal)} · ${pct}%</span></div><div class="progress"><i style="width:${pct}%"></i></div></div>`:""}
 <div class="grid4">${[`${card("pay","Pay billed",money(st.payB),"",`${money(st.payPaid)} received so far`)}`,`${card("reimb","Reimbursements billed",money(st.reB+st.pdB),"",`${money(st.reB)} expenses + ${money(st.pdB)} per diems`)}`,`${card("out","Waiting on payment",money(st.outstanding),"goldc",`${st.inv.filter(i=>i.status==="sent").length} invoices${over.length?` · ${over.length} over 30 days`:""}`)}`,`${card("exp","Business write-offs",money(st.ownExp),"",`Your own costs, before GST${st.billedBack?` · plus ${money(st.billedBack)} billed back to clients`:""}`)}`,`${card("gst",st.net>=0?"GST/HST owing":"GST/HST refund",money(Math.abs(st.net)),st.net>=0?"red":"green",`${money(st.collected)} collected − ${money(st.claimed)} credits`)}`,`${card("tax","Set aside for tax",money(st.tax.due),"goldc",`Income tax + CPP on ${money(st.netInc)} net · about ${st.gross?Math.round(st.tax.total/st.gross*100):0}% of income`)}`].map((c,ix)=>c+(S.drill===["pay","reimb","out","exp","gst","tax"][ix]?`<div style="grid-column:1/-1">${drillView(st)}</div>`:"")).join("")}</div>
 ${st.review?`<div class="panel hot row" style="justify-content:space-between"><span><b>${st.review}</b> receipts pulled from Gmail are waiting for a quick category check.</span><button class="btn sm gold" data-act="reviewFilter">Review them</button></div>`:""}
@@ -1335,6 +1378,11 @@ async function cloudBackupNow(manual){
   catch(e){CLOUD.lastErr=(e&&e.message)||"The backup didn't finish."}
   await cloudPersist();cloudBusy=false;redrawSoon();if(cloudPending){cloudPending=false;cloudDirty()}
 }
+/* also backs up when you leave the app, and at least once a week */
+function cloudWeekly(){if(CLOUD.provider&&!CLOUD.relink&&(CLOUD.dirty||!CLOUD.lastSync||Date.now()-Date.parse(CLOUD.lastSync)>7*864e5))cloudBackupNow(false)}
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="hidden"&&CLOUD.provider&&CLOUD.dirty){clearTimeout(cloudTimer);cloudBackupNow(false)}else if(document.visibilityState==="visible")setTimeout(cloudWeekly,3000)});
+window.addEventListener("pagehide",()=>{if(CLOUD.provider&&CLOUD.dirty){clearTimeout(cloudTimer);cloudBackupNow(false)}});
+setTimeout(cloudWeekly,8000);
 function cloudDirty(now){bkCount();if(!CLOUD.provider)return;if(!CLOUD.dirty){CLOUD.dirty=true;cloudPersist()}clearTimeout(cloudTimer);cloudTimer=setTimeout(()=>cloudBackupNow(false),now?600:20000)}
 async function cloudRestore(){
   const ui=S.cloudUI||{};CLOUD.lastErr="";
@@ -1362,7 +1410,7 @@ function cloudSection(){
 ${!gOk||!dOk?`<p class="note" style="margin-top:6px">${!gOk&&!dOk?"Cloud backup":!gOk?"Google Drive":"Dropbox"} hasn't been set up on this copy of the app yet.</p>`:""}${CLOUD.lastErr?`<div class="err" style="margin-top:6px">${esc(CLOUD.lastErr)}</div>`:""}</div>`;
   const offArm=S.armed==="cloudOff",resArm=S.armed==="cloudRes";
   return `<div class="panel" style="background:var(--bg);margin-top:12px"><div class="label">Cloud backup · ${esc(cloudName())}</div>
-<p class="note" style="margin:6px 0">Backs up automatically about 20 seconds after each change. Last backup: <b>${esc(when)}</b>${CLOUD.encrypt?` · <b>locked with your passphrase</b>${cloudKey?"":" (enter it below to keep backing up)"}`:""}.</p>
+<p class="note" style="margin:6px 0">Backs up automatically after each change, when you leave the app, and at least once a week. It keeps one backup file and replaces it each time, so nothing piles up. Last backup: <b>${esc(when)}</b>${CLOUD.encrypt?` · <b>locked with your passphrase</b>${cloudKey?"":" (enter it below to keep backing up)"}`:""}.</p>
 ${CLOUD.lastErr?`<div class="err" style="margin:6px 0">${esc(CLOUD.lastErr)}</div>`:""}
 <div class="row"><button class="btn sm gold" data-act="cloudNow" ${cloudBusy?"disabled":""}>${cloudBusy?'<span class="spin"></span> Backing up…':"Back up now"}</button><button class="btn sm ${resArm?"armed":""}" data-act="cloudRes">${resArm?"Tap again to restore":`Restore from ${esc(cloudName())}`}</button><button class="btn sm ${offArm?"armed":"ghost"}" data-act="cloudOff">${offArm?"Tap again to disconnect":"Disconnect"}</button></div>
 <div style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">
@@ -2224,7 +2272,7 @@ function vSettings(){
 <div class="row" style="margin-top:10px"><button class="btn gold" data-act="saveSettings">Save</button></div></section>
 ${vCustomize()}
 <section class="panel" style="max-width:640px"><div class="label">Bring in earlier books</div>
-<p class="note" style="margin:6px 0 10px">${OFFLINE?"Load a backup file (.json) you saved from this app before, on this device or another one.":"Load a books backup file (.json) from Dropbox › Guitar Man Finance › Backups."}</p>
+<p class="note" style="margin:6px 0 10px">${OFFLINE?"Load a backup file (.json) you saved from this app before, on this device or another one.":"Pick the newest books file in Dropbox › Guitar Man Finance › Backups. To bring back receipt photos too, select the files in Backups › Photos as well (you can pick them all at once)."}</p>
 <label tabindex="0" role="button" class="btn" for="jsonIn">${ICON.up}Load backup file</label>${msgLine(S.msg.import)}</section>
 
 ${styleSection()}
@@ -2351,7 +2399,14 @@ $("#logoRefIn").addEventListener("change",e=>{const f=e.target.files&&e.target.f
 $("#logoImgIn").addEventListener("change",e=>{const f=e.target.files&&e.target.files[0];e.target.value="";onLogoImg(f,false)});
 document.addEventListener("toggle",e=>{if(e.target&&e.target.dataset&&e.target.dataset.cust)S.custOpen=e.target.open;if(e.target&&e.target.dataset&&e.target.dataset.streams)S.streamsOpen=e.target.open;if(e.target&&e.target.dataset&&e.target.dataset.erase){S.eraseOpen=e.target.open;if(!e.target.open)S.erase=null}},true);
 $("#jsonIn").addEventListener("change",async e=>{
-  const f=e.target.files&&e.target.files[0];e.target.value="";if(!f)return;
+  const fl=[...(e.target.files||[])];e.target.value="";if(!fl.length)return;
+  if(fl.length>1||/"kind":\s*"photo"/.test(await fl[0].slice(0,400).text())){let nb=0,np=0,bad=0;S.msg.import="ok:Loading "+fl.length+" files…";render(true);
+    const sorted=[];for(const f of fl){try{const j=JSON.parse(await f.text());sorted.push(j)}catch{bad++}}
+    sorted.sort((a,b)=>(Array.isArray(b.invoices)||Array.isArray(b.receipts)?1:0)-(Array.isArray(a.invoices)||Array.isArray(a.receipts)?1:0));
+    for(const j of sorted){if(Array.isArray(j.invoices)||Array.isArray(j.receipts)){nb++;for(const x of [...(j.invoices||[]),...(j.receipts||[]),...(j.trips||[]),...(j.incomes||[])])if(x&&x.id&&["invoice","receipt","trip","income"].includes(x.kind))await save(x,true);if(j.settings&&typeof j.settings==="object")await save({...S.settings,...j.settings,kind:"settings",id:"settings"},true)}
+      if(j.images&&S.col)for(const [id,u] of Object.entries(j.images)){if(typeof u==="string"&&u.startsWith("data:image/"))try{await S.col.doc("img_"+id).set({kind:"image",data:u});delete S.imgCache[id];np++}catch{}}}
+    S.msg.import=nb||np?`ok:Restored ${nb?`${nb} books file${nb===1?"":"s"}`:""}${nb&&np?" and ":""}${np?`${np} receipt photo${np===1?"":"s"}`:""}.${bad?` ${bad} file${bad===1?"":"s"} couldn't be read.`:""}`:"err:Those aren't Guitar Man Finance backup files.";render(true);return}
+  const f=fl[0];
   try{
     const j=JSON.parse(await f.text());const invs=Array.isArray(j.invoices)?j.invoices:[],recs=Array.isArray(j.receipts)?j.receipts:[],trs=Array.isArray(j.trips)?j.trips:[],incs=Array.isArray(j.incomes)?j.incomes:[];
     if(!invs.length&&!recs.length)throw new Error("empty");
