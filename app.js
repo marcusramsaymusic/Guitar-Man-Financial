@@ -1,6 +1,6 @@
 /* ———————————— constants ———————————— */
-const PERSONAL="Personal (not deductible)";
-const CATS=["Instruments & gear","Repairs & maintenance","Studio supplies","Software & subscriptions","Home studio (workspace-in-home)","Vehicle & fuel","Travel & accommodation","Meals & entertainment","Advertising & promo","Professional fees","Insurance","Phone & internet","Contract labour","Fitness on the road","Other",PERSONAL];
+const PERSONAL="Personal (not deductible)",NOTMINE="Paid by someone else";
+const CATS=["Instruments & gear","Repairs & maintenance","Studio supplies","Software & subscriptions","Home studio (workspace-in-home)","Vehicle & fuel","Travel & accommodation","Meals & entertainment","Advertising & promo","Professional fees","Insurance","Phone & internet","Contract labour","Fitness on the road","Other",PERSONAL,NOTMINE];
 const CURS=["CAD","USD","EUR","GBP","AUD","JPY"];
 const TAX=[{k:"GST5",l:"GST 5%",t:"GST",r:5},{k:"HST13",l:"HST 13% (ON)",t:"HST",r:13},{k:"HST15",l:"HST 15% (NS/NB/NL/PE)",t:"HST",r:15},{k:"NONE",l:"No tax",t:"None",r:0}];
 const ROOT="/Guitar Man Finance";
@@ -28,7 +28,9 @@ const ddmmyy=d=>{const m=String(d||"").match(/^(\d{4})-(\d{2})-(\d{2})/);return 
 const yearOf=d=>d?Number(String(d).slice(0,4)):new Date().getFullYear();
 const quarterOf=d=>Math.floor((Number(String(d).slice(5,7))-1)/3)+1;
 const isCAD=x=>!x.currency||x.currency==="CAD";
-const isPersonal=r=>r.category===PERSONAL;
+const isPersonal=r=>r.category===PERSONAL||r.category===NOTMINE;
+/* a receipt someone forwarded to you: a flight a band manager booked, a hotel a bandmate paid for */
+const isFwd=(subj,text)=>/^\s*(fwd?|fw|tr)\s*:/i.test(subj||"")||/-{4,}\s*Forwarded message\s*-{4,}|Begin forwarded message:/i.test(text||"");
 const invTotals=inv=>{
   const items=inv.items||[];
   const sub=items.reduce((s,it)=>s+num(it.qty||1)*num(it.rate),0);
@@ -183,7 +185,7 @@ const INVOICE_PROMPT=`The image is an invoice that a Canadian musician previousl
 function emailBatchPrompt(batch){
   return `Each block below is one email from a self-employed Canadian musician's inbox (based in Canada). Decide whether each is a receipt for money he actually paid (purchases, subscriptions, flights, parking, rides, meals, bookings that were charged). Shipping updates, reminders, marketing, refunds, $0 changes, quotes, and bookings paid by someone else are NOT receipts.
 Reply with only a JSON array, one object per email, in the same order:
-{"id": the email id given, "isReceipt": boolean, "vendor": string, "date": "YYYY-MM-DD", "currency": 3-letter code of the amount charged (CAD if it says it was charged in CAD), "total": number (grand total charged), "tax": number or null (GST or HST only, as printed; null if the email doesn't list GST/HST separately; 0 if foreign or printed as $0), "province": two-letter Canadian province or territory code where it was bought or the service was delivered, or null, "category": one of ${JSON.stringify(CATS)} (gym day passes and gym memberships go in "Fitness on the road"; use "${PERSONAL}" for clearly personal things like streaming, household, gifts, vacations), "note": short description}
+{"id": the email id given, "isReceipt": boolean, "forwarded": boolean (true if someone else forwarded this receipt to him, e.g. a flight or hotel another person booked), "vendor": string, "date": "YYYY-MM-DD", "currency": 3-letter code of the amount charged (CAD if it says it was charged in CAD), "total": number (grand total charged), "tax": number or null (GST or HST only, as printed; null if the email doesn't list GST/HST separately; 0 if foreign or printed as $0), "province": two-letter Canadian province or territory code where it was bought or the service was delivered, or null, "category": one of ${JSON.stringify(CATS)} (gym day passes and gym memberships go in "Fitness on the road"; use "${PERSONAL}" for clearly personal things like streaming, household, gifts, vacations), "note": short description}
 
 ${batch.map(b=>`=== EMAIL id=${b.id} | from: ${b.from} | subject: ${b.subject} | date: ${b.date}\n${b.text}`).join("\n\n")}`;
 }
@@ -285,9 +287,10 @@ async function syncGmail(auto){
       try{out=await S.sample.json(emailBatchPrompt(batch.filter(b=>b.text)),{signal:ctl.signal})}catch(e){if(e&&e.code==="cancelled")throw e;out=[]}
       for(const m of batch){
         const x=(Array.isArray(out)?out:[]).find(o=>String(o.id)===m.id);
-        if(x&&x.isReceipt&&num(x.total)>0){
+        const fw=!!(x&&(x.forwarded===true||isFwd(m.subject,m.text)));
+        if(x&&x.isReceipt&&num(x.total)>0&&!(fw&&S.settings.fwdMode==="skip")){
           const cur=CURS.includes(x.currency)?x.currency:"CAD";
-          await save(withTaxEst({kind:"receipt",id:"rec_g"+m.id,gid:m.id,source:"gmail",url:m.url,needsReview:true,vendor:cleanText(x.vendor||m.from).slice(0,80),date:/^\d{4}-\d{2}-\d{2}$/.test(x.date||"")?x.date:m.date,currency:cur,total:num(x.total),taxPaid:cur==="CAD"?num(x.tax):0,category:CATS.includes(x.category)?x.category:"Other",note:cleanText(x.note||m.subject).slice(0,140),hasImage:false,backup:"off",createdAt:Date.now()},x),true);
+          await save(withTaxEst({kind:"receipt",id:"rec_g"+m.id,gid:m.id,source:"gmail",url:m.url,needsReview:true,...(fw&&S.settings.fwdMode!=="count"?{forwarded:true}:{}),vendor:cleanText(x.vendor||m.from).slice(0,80),date:/^\d{4}-\d{2}-\d{2}$/.test(x.date||"")?x.date:m.date,currency:cur,total:num(x.total),taxPaid:cur==="CAD"?num(x.tax):0,category:CATS.includes(x.category)?x.category:"Other",note:cleanText(x.note||m.subject).slice(0,140),hasImage:false,backup:"off",createdAt:Date.now()},x),true);
           S.sync.added++;
         }else S.sync.skipped++;
         S.sync.done++;
@@ -858,7 +861,7 @@ function yearStats(y){
   const outstanding=ci.filter(i=>i.status==="sent").reduce((s,i)=>s+invTotals(i).total,0);
   const homeRent=(num(S.settings.rentMonthly)+num(S.settings.utilMonthly))*monthsIn(y)*f.home;
   const crOwn=cr.filter(r=>!r.billedTo&&!r.stream),crBilled=cr.filter(r=>r.billedTo&&!r.stream);
-  const cats=CATS.filter(c=>c!==PERSONAL).map(c=>[c,crOwn.filter(r=>r.category===c).reduce((s,r)=>s+deductible(r,f),0)]).filter(([,v])=>v>0);
+  const cats=CATS.filter(c=>c!==PERSONAL&&c!==NOTMINE).map(c=>[c,crOwn.filter(r=>r.category===c).reduce((s,r)=>s+deductible(r,f),0)]).filter(([,v])=>v>0);
   const billedBack=crBilled.reduce((s,r)=>s+deductible(r,f),0);
   const ownExp=cats.reduce((s,[,v])=>s+v,0)+homeRent,expenses=ownExp+billedBack;
   const personal=rec.filter(isPersonal).reduce((s,r)=>s+(isCAD(r)?num(r.total):0),0);
@@ -1558,7 +1561,7 @@ async function importGmailReceipt(m){
   if(!S.sample)throw{code:"not_granted"};
   const out=await S.sample.json(emailBatchPrompt([{id:m.id,from:m.from,subject:m.subject,date:m.date,text:text.slice(0,5000)}]));
   const x=(Array.isArray(out)?out[0]:out)||{};const cur=CURS.includes(x.currency)?x.currency:"CAD";
-  const rec={kind:"receipt",id:"rec_g"+m.id,gid:m.id,source:"gmail",url:r.viewUrl||m.url,vendor:cleanText(x.vendor||m.from).slice(0,80),date:/^\d{4}-\d{2}-\d{2}$/.test(x.date||"")?x.date:m.date,currency:cur,total:num(x.total),taxPaid:cur==="CAD"?num(x.tax):0,category:CATS.includes(x.category)&&x.category!==PERSONAL?x.category:"Travel & accommodation",note:cleanText(x.note||m.subject).slice(0,140),emailText:text.slice(0,6000),needsReview:!num(x.total),hasImage:false,backup:S.mcp?"pending":"off",createdAt:Date.now()};withTaxEst(rec,x);
+  const rec={kind:"receipt",id:"rec_g"+m.id,gid:m.id,source:"gmail",url:r.viewUrl||m.url,...((x.forwarded===true||isFwd(m.subject,text))&&S.settings.fwdMode!=="count"?{forwarded:true,needsReview:true}:{}),vendor:cleanText(x.vendor||m.from).slice(0,80),date:/^\d{4}-\d{2}-\d{2}$/.test(x.date||"")?x.date:m.date,currency:cur,total:num(x.total),taxPaid:cur==="CAD"?num(x.tax):0,category:CATS.includes(x.category)&&x.category!==PERSONAL?x.category:"Travel & accommodation",note:cleanText(x.note||m.subject).slice(0,140),emailText:text.slice(0,6000),needsReview:!num(x.total),hasImage:false,backup:S.mcp?"pending":"off",createdAt:Date.now()};withTaxEst(rec,x);
   await save(rec,true);backupReceipt(rec.id);return{rec,existed:false,notReceipt:x.isReceipt===false};
 }
 async function gfindPick(i){
@@ -2217,7 +2220,8 @@ function billBar(r,m){
   return "";
 }
 function revBar(r){
-  if(S.revNo===r.id)return `<div class="revbar"><span class="note">What's wrong with it?</span><button class="btn sm" data-act="revPersonal" data-v="${r.id}">It's personal</button><button class="btn sm" data-act="billPick" data-v="${r.id}">I billed it to a client</button><button class="btn sm danger" data-act="revDelete" data-v="${r.id}">Not a real receipt — remove</button><button class="btn sm ghost" data-act="revEditOne" data-v="${r.id}">Fix details</button><button class="btn sm ghost" data-act="revCancel">Back</button></div>`;
+  if(r.forwarded&&!r.fwdAnswered&&S.revNo!==r.id)return `<div class="revbar"><span class="note">Someone forwarded this to you. Did you pay for it?</span><button class="btn sm gold" data-act="fwdMine" data-v="${r.id}">I paid for it</button><button class="btn sm" data-act="fwdOther" data-v="${r.id}">Someone else paid</button></div>`;
+  if(S.revNo===r.id)return `<div class="revbar"><span class="note">What's wrong with it?</span><button class="btn sm" data-act="fwdOther" data-v="${r.id}">Someone else paid</button><button class="btn sm" data-act="revPersonal" data-v="${r.id}">It's personal</button><button class="btn sm" data-act="billPick" data-v="${r.id}">I billed it to a client</button><button class="btn sm danger" data-act="revDelete" data-v="${r.id}">Not a real receipt — remove</button><button class="btn sm ghost" data-act="revEditOne" data-v="${r.id}">Fix details</button><button class="btn sm ghost" data-act="revCancel">Back</button></div>`;
   return `<div class="revbar"><span class="note">Right category?</span><select data-revcat="${r.id}" aria-label="Category" style="width:auto;max-width:230px;padding:6px 8px;font-size:13.5px">${CATS.map(c=>`<option ${c===r.category?"selected":""}>${esc(c)}</option>`).join("")}</select><button class="btn sm green" data-act="revYes" data-v="${r.id}">✓ Yes</button><button class="btn sm danger" data-act="revNo" data-v="${r.id}">✗ No</button>${r.billedTo?"":`<button class="btn sm ghost" data-act="billPick" data-v="${r.id}">Billed to a client</button>`}</div>`;
 }
 function vDraft(d){
@@ -2242,7 +2246,7 @@ ${(S.settings.streams||[]).some(x=>x.type==="business")?`<div class="field"><lab
 ${isPersonal(d)||d.billedTo?"":`<div class="field billlater ${d.billLater?"on":""}" style="grid-column:1/-1"><label class="chk" style="padding:4px 0"><input type="checkbox" data-billlater="1" ${d.billLater?"checked":""} ${reading?"disabled":""}> <b>Bill later</b></label>
 ${d.billLater?`<input id="rd-billto" data-bind="recDraft.billTo" list="billto-list" autocomplete="off" placeholder="Who pays for this? (client name)" value="${esc(d.billTo||"")}"><datalist id="billto-list">${knownClients().map(n=>`<option value="${esc(n)}">`).join("")}</datalist>`:""}</div>`}</div>
 ${d.currency!=="CAD"?`<p class="note">Foreign receipt: kept as a record; its tax never enters your GST/HST claim.</p>`:""}
-${d.category===PERSONAL?`<p class="note">Personal items stay out of write-offs and GST/HST credits.</p>`:""}
+${d.category===PERSONAL?`<p class="note">Personal items stay out of write-offs and GST/HST credits.</p>`:d.category===NOTMINE?`<p class="note">Kept as a record only. Someone else paid, so it stays out of your write-offs and GST/HST credits.</p>`:""}
 ${d.category==="Vehicle & fuel"?`<p class="note">Vehicle costs count at your business-use % (${Math.round(factors(yearOf(d.date)).veh*100)}%), set on the Mileage tab.</p>`:""}
 ${d.category==="Home studio (workspace-in-home)"?`<p class="note">Home studio costs count at the studio's share of your home (${Math.round(factors(yearOf(d.date)).home*100)}%), set in Settings.</p>`:""}
 ${d.category==="Meals & entertainment"?`<p class="note">Meals &amp; entertainment GST/HST is claimed at 50%.</p>`:""}
@@ -2524,6 +2528,9 @@ document.addEventListener("click",async e=>{
     case "revYes":{const r=S.receipts.find(x=>x.id===v);if(r)await save({...r,needsReview:false},true);render(true);break}
     case "revNo":S.revNo=v;render(true);break;
     case "revCancel":S.revNo=null;render(true);break;
+    case "fwdMine":{const r=S.receipts.find(x=>x.id===v);if(r)await save({...r,fwdAnswered:true},true);render(true);break}
+    case "fwdOther":{const r=S.receipts.find(x=>x.id===v);S.revNo=null;if(r){await save({...r,category:NOTMINE,needsReview:false,fwdAnswered:true,billLater:""},true);toast(`${r.vendor}: kept as a record, not a write-off.`)}render(true);break}
+    case "fwdMode":await save({...S.settings,kind:"settings",id:"settings",fwdMode:v},true);render(true);break;
     case "revPersonal":{const r=S.receipts.find(x=>x.id===v);S.revNo=null;if(r){await save({...r,category:PERSONAL,needsReview:false},true);toast(`${r.vendor} moved to Personal.`)}render(true);break}
     case "revDelete":{S.revNo=null;await removeDoc(v,"receipt");if(S.col){S.col.doc("img_"+v).delete().catch(()=>{})}toast("Removed.");break}
     case "revEditOne":{S.revNo=null;const btn=document.createElement("button");btn.dataset.act="editRec";btn.dataset.v=v;document.body.appendChild(btn);btn.click();btn.remove();break}
