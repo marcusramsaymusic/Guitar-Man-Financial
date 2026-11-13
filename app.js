@@ -308,12 +308,12 @@ async function syncGmail(auto){
 async function ensureFolders(paths){
   for(const p of paths){
     if(S.dbxOk.has(p))continue;
-    try{await S.mcp.callTool("Dropbox","create_folder",{path:p})}catch(e){if(e.code!=="tool_error")throw e}
+    try{await withTimeout(S.mcp.callTool("Dropbox","create_folder",{path:p}),60000)}catch(e){if(e.code!=="tool_error")throw e}
     S.dbxOk.add(p);
   }
 }
 async function dbxCreate(path,content){
-  try{await S.mcp.callTool("Dropbox","create_file",{path,content})}
+  try{await withTimeout(S.mcp.callTool("Dropbox","create_file",{path,content}),90000)}
   catch(e){const blob=String(e.message||"")+JSON.stringify(e.result||"");if(e.code==="tool_error"&&/ALREADY_EXISTS|already exists|conflict/i.test(blob))return;throw e}
 }
 function receiptHTML(r,img){
@@ -363,34 +363,51 @@ function booksData(){return{app:"Guitar Man Finance",exported:new Date().toISOSt
 function strHash(s){let h=2166136261>>>0;for(let i=0;i<s.length;i++){h^=s.charCodeAt(i);h=Math.imul(h,16777619)>>>0}return h.toString(36)+"."+s.length.toString(36)}
 const booksSig=()=>strHash(JSON.stringify({s:bkSettings(),i:S.invoices,r:S.receipts,t:S.trips,n:S.incomes}));
 let bkBusy=false,bkAgain=false,bkTimer=null,bkWarned=false;
+/* when Dropbox doesn't answer, it keeps trying in the background, like the Gmail drafts: 15s, 30s, 1m, 2m, 5m, 10m, 15m, then every 30m */
+const BK_WAIT=[0,15,30,60,120,300,600,900,1800,1800,1800,1800];
+function bkRetryLater(manual){const n=(S.bkJob?S.bkJob.tries:0)+1;if(n>=BK_WAIT.length){S.bkJob=null;bkDraw();return false}
+  clearTimeout(S.bkJob&&S.bkJob.timer);S.bkJob={tries:n,manual:manual||!!(S.bkJob&&S.bkJob.manual),next:Date.now()+BK_WAIT[n]*1000,state:"waiting"};
+  S.bkJob.timer=setTimeout(()=>booksBackup("retry"),BK_WAIT[n]*1000);bkDraw();return true}
+function bkDraw(){let el=$("#bkPill");const j=S.bkJob;
+  if(!j){if(el)el.remove();return}
+  if(!el){el=document.createElement("div");el.id="bkPill";el.setAttribute("role","status");document.body.appendChild(el)}
+  const secs=Math.max(0,Math.round((j.next-Date.now())/1000)),when=secs>=90?Math.round(secs/60)+" min":secs+"s";
+  el.innerHTML=`<span class="spin"></span><span>${j.state==="running"?`Backing up to Dropbox${j.tries>1?` (try ${j.tries})`:""}…`:`Retrying Dropbox in ${when}`}</span>${j.state==="waiting"?`<button class="btn sm ghost" data-act="bkNow">Now</button>`:""}<button class="btn sm ghost" data-act="bkStop">Stop</button>`;
+  clearTimeout(j.tick);if(j.state==="waiting")j.tick=setTimeout(bkDraw,1000)}
 function bkSoon(ms){if(!dropboxOn()||!S.persist)return;clearTimeout(bkTimer);bkTimer=setTimeout(()=>booksBackup("auto"),ms)}
 const bkPending=()=>dropboxOn()&&S.persist&&(booksSig()!==S.settings.bkSig||Date.now()-(S.settings.bkAt||0)>BK_WEEK||S.receipts.some(r=>r.hasImage&&!(S.settings.bkPhotos||[]).includes(r.id)));
 async function booksBackup(why){
   if(!dropboxOn()||!S.persist||!S.booted)return false;
   if(bkBusy){bkAgain=true;return false}
-  const manual=why==="manual",sig=booksSig(),stale=Date.now()-(S.settings.bkAt||0)>BK_WEEK;
+  if(why!=="retry"&&S.bkJob&&S.bkJob.state==="waiting"){clearTimeout(S.bkJob.timer)}
+  const manual=why==="manual",force=manual||(why==="retry"&&S.bkJob&&S.bkJob.manual),sig=booksSig(),stale=Date.now()-(S.settings.bkAt||0)>BK_WEEK;
   const done=new Set(S.settings.bkPhotos||[]);const photos=S.receipts.filter(r=>r.hasImage&&!done.has(r.id));
-  if(!manual&&sig===S.settings.bkSig&&!stale&&!photos.length)return true;
+  if(!force&&sig===S.settings.bkSig&&!stale&&!photos.length){if(S.bkJob){clearTimeout(S.bkJob.timer);S.bkJob=null;bkDraw()}return true}
   bkBusy=true;if(manual){S.busy.ledger=true;S.msg.ledger="";render()}
+  if(S.bkJob){S.bkJob.state="running";bkDraw()}
   try{
     const stamp=new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
     await ensureFolders([ROOT,ROOT+"/Backups",ROOT+"/Backups/Photos"]);
-    if(manual||sig!==S.settings.bkSig||stale){
+    if(force||sig!==S.settings.bkSig||stale){
       await dbxCreate(`${ROOT}/Backups/books-${stamp}.json`,JSON.stringify(booksData(),null,1));
       await dbxCreate(`${ROOT}/Backups/summary-${S.year}-${stamp}.html`,summaryHTML(S.year))}
     for(const r of photos.slice(0,40)){const u=await getImage(r.id);if(!u){done.add(r.id);continue}
       if(u.length<4.8e6)await dbxCreate(`${ROOT}/Backups/Photos/${r.date||"undated"} ${safeName(r.vendor)} ${r.id}.json`,JSON.stringify({app:"Guitar Man Finance",kind:"photo",images:{[r.id]:u}}));done.add(r.id)}
     const ids=new Set(S.receipts.map(r=>r.id));
     await save({...S.settings,kind:"settings",id:"settings",bkAt:Date.now(),bkSig:sig,bkErr:"",bkPhotos:[...done].filter(x=>ids.has(x))},true);
+    const retried=S.bkJob&&S.bkJob.tries>0;if(S.bkJob){clearTimeout(S.bkJob.timer);S.bkJob=null;bkDraw()}
     await bkPrune().catch(()=>{});
-    if(manual)S.msg.ledger="ok:Backed up. Your books are in Dropbox › Guitar Man Finance › Backups.";
+    if(manual)S.msg.ledger="ok:Backed up. Your books are in Dropbox › Guitar Man Finance › Backups.";else if(retried){S.msg.ledger="";toast("Dropbox backup went through.")}
     return true}
   catch(e){const m=mcpErr(e,"Dropbox");if(S.settings.bkErr!==m)save({...S.settings,kind:"settings",id:"settings",bkErr:m},true);
-    if(manual)S.msg.ledger="err:"+m;else if(!bkWarned){bkWarned=true;toast("Dropbox backup didn't go through. It'll try again next time.")}
+    const again=!isFatal(e)&&bkRetryLater(manual);
+    if(manual)S.msg.ledger=again?"ok:Dropbox isn't answering. It keeps trying in the background, so you can leave this page.":"err:"+m;
+    else if(!again&&!bkWarned){bkWarned=true;toast("Dropbox backup didn't go through. It'll try again next time you open the app.")}
+    if(!again&&S.bkJob){S.bkJob=null;bkDraw()}
     return false}
   finally{bkBusy=false;if(manual)S.busy.ledger=false;render();if(bkAgain){bkAgain=false;bkSoon(15e3)}}}
-async function dbxList(path){const out=[];let p=pl(await S.mcp.callTool("Dropbox","list_folder",{path,recursive:false,object_types:["file"],max_results:600},{cache:false}));
-  for(let n=0;n<10;n++){out.push(...(p.entries||[]));if(!p.has_more||!p.cursor)break;p=pl(await S.mcp.callTool("Dropbox","list_folder",{cursor:p.cursor},{cache:false}))}return out}
+async function dbxList(path){const out=[];let p=pl(await withTimeout(S.mcp.callTool("Dropbox","list_folder",{path,recursive:false,object_types:["file"],max_results:600},{cache:false}),60000));
+  for(let n=0;n<10;n++){out.push(...(p.entries||[]));if(!p.has_more||!p.cursor)break;p=pl(await withTimeout(S.mcp.callTool("Dropbox","list_folder",{cursor:p.cursor},{cache:false}),60000))}return out}
 /* keeps the newest 7 books backups plus the newest one from each of the last 12 months, the newest summary per year, and photos of receipts you still have. Deleted copies go to Dropbox's Deleted files. */
 async function bkPrune(){
   const files=await dbxList(ROOT+"/Backups");const kill=[];
@@ -404,6 +421,7 @@ async function bkPrune(){
   return kill.length}
 function bkStatus(){if(!dropboxOn())return "";const s=S.settings;
   if(bkBusy)return `<span class="note"><span class="spin"></span> Backing up to Dropbox…</span>`;
+  if(S.bkJob)return `<span class="note">Dropbox isn't answering. It keeps trying in the background.</span>`;
   if(s.bkErr)return `<span class="note red">Dropbox backup failed: ${esc(s.bkErr)}</span>`;
   return s.bkAt?`<span class="note">Backed up to Dropbox ${esc(ago2(s.bkAt))}${booksSig()===s.bkSig?"":" · changes waiting"}</span>`:`<span class="note">Not backed up to Dropbox yet</span>`}
 function ago2(t){const m=(Date.now()-t)/6e4;return m<1.5?"just now":m<60?Math.round(m)+" min ago":m<36*60?Math.round(m/60)+" h ago":Math.round(m/1440)+" days ago"}
@@ -565,7 +583,7 @@ function mailDraw(){let el=$("#mailPill");const j=S.mailJob;
   if(!j||j.state==="done"||j.state==="failed"){if(el)el.remove();return}
   if(!el){el=document.createElement("div");el.id="mailPill";el.setAttribute("role","status");document.body.appendChild(el)}
   const secs=j.next?Math.max(0,Math.round((j.next-Date.now())/1000)):0;
-  el.innerHTML=`<span class="spin"></span><span>${j.state==="waiting"?`Gmail's slow. Trying again in ${secs}s (try ${j.attempt+1})`:j.state==="checking"?"Checking your Gmail drafts…":j.attempt>1?`Sending to Gmail (try ${j.attempt})…`:"Sending to Gmail…"}</span>${j.state==="waiting"?`<button class="btn sm ghost" data-act="mailNow">Now</button>`:""}<button class="btn sm ghost" data-act="mailStop">Stop</button>`;
+  el.innerHTML=`<span class="spin"></span><span>${j.state==="waiting"?`Retrying Gmail in ${secs}s`:j.state==="checking"?"Checking your Gmail drafts…":j.attempt>1?`Sending to Gmail (try ${j.attempt})…`:"Sending to Gmail…"}</span>${j.state==="waiting"?`<button class="btn sm ghost" data-act="mailNow">Now</button>`:""}<button class="btn sm ghost" data-act="mailStop">Stop</button>`;
   if(j.state==="waiting"){clearTimeout(j.tick);j.tick=setTimeout(mailDraw,1000)}}
 function resumeMailJobs(){if(S.mailJob||!S.mcp)return;const inv=S.invoices.find(i=>i.mailPending&&Date.now()-i.mailPending.at<36*3600e3);if(!inv)return;
   S.mailFor=inv.id;S.mailBody=inv.mailPending.body||"";S.mailSubj=inv.mailPending.subject||"";emailInvoice({...inv,clientEmail:(inv.mailPending.to||[]).join(", ")||inv.clientEmail})}
@@ -1189,7 +1207,7 @@ function vDash0(st){
   return `${reviewBanners()}${gmailCard()}${billLaterPanel()}<div class="row">${yearPicker()}</div>
 <div class="row">
   <button class="btn sm" data-act="pdf" ${S.busy.pdf?"disabled":""}>${S.busy.pdf?'<span class="spin"></span> Building PDF…':"Print year-end report"}</button>
-  ${dropboxOn()?`<button class="btn sm" data-act="ledger" ${S.busy.ledger?"disabled":""}>${S.busy.ledger?'<span class="spin"></span> Backing up…':"Back up now"}</button>`:""}
+  ${dropboxOn()?`<button class="btn sm" data-act="ledger" ${S.busy.ledger?"disabled":""}>${S.busy.ledger?'<span class="spin"></span> Backing up…':"Back up to Dropbox"}</button>`:""}
 </div>${dropboxOn()&&!S.msg.ledger?`<div>${bkStatus()}</div>`:""}${msgLine(S.msg.pdf)}${msgLine(S.msg.ledger)}
 ${goal?`<div class="panel"><div class="row" style="justify-content:space-between"><span class="label">${S.year} income goal</span><span class="mono">${money(st.payB)} of ${money(goal)} · ${pct}%</span></div><div class="progress"><i style="width:${pct}%"></i></div></div>`:""}
 <div class="grid4">${[`${card("pay","Pay billed",money(st.payB),"",`${money(st.payPaid)} received so far`)}`,`${card("reimb","Reimbursements billed",money(st.reB+st.pdB),"",`${money(st.reB)} expenses + ${money(st.pdB)} per diems`)}`,`${card("out","Waiting on payment",money(st.outstanding),"goldc",`${st.inv.filter(i=>i.status==="sent").length} invoices${over.length?` · ${over.length} over 30 days`:""}`)}`,`${card("exp","Business write-offs",money(st.ownExp),"",`Your own costs, before GST${st.billedBack?` · plus ${money(st.billedBack)} billed back to clients`:""}`)}`,`${card("gst",st.net>=0?"GST/HST owing":"GST/HST refund",money(Math.abs(st.net)),st.net>=0?"red":"green",`${money(st.collected)} collected − ${money(st.claimed)} credits`)}`,`${card("tax","Set aside for tax",money(st.tax.due),"goldc",`Income tax + CPP on ${money(st.netInc)} net · about ${st.gross?Math.round(st.tax.total/st.gross*100):0}% of income`)}`].map((c,ix)=>c+(S.drill===["pay","reimb","out","exp","gst","tax"][ix]?`<div style="grid-column:1/-1">${drillView(st)}</div>`:"")).join("")}</div>
@@ -2449,6 +2467,8 @@ document.addEventListener("click",async e=>{
     case "status":{const inv=S.invoices.find(i=>i.id===v);if(inv){await save({...inv,status:b.dataset.s});toast(b.dataset.s==="paid"?`#${inv.number} marked paid.`:"Marked "+b.dataset.s+".");autoBackupInv(inv.id);if(b.dataset.s==="paid"&&S.invViewId===inv.id)goBack()}break}
     case "mailNow":if(S.mailJob&&S.mailJob.state==="waiting"){clearTimeout(S.mailJob.timer);S.mailJob.running=false;runMailJob()}break;
     case "styleForget":{const st={...(S.settings.mailStyle||{})};delete st[v];await save({...S.settings,kind:"settings",id:"settings",mailStyle:st},true);if(S.invViewId){S.mailFor=null}toast("Back to the default wording for that one.");render(true);break}
+    case "bkNow":if(S.bkJob&&S.bkJob.state==="waiting"){clearTimeout(S.bkJob.timer);booksBackup("retry")}break;
+    case "bkStop":if(S.bkJob){clearTimeout(S.bkJob.timer);S.bkJob=null;bkDraw();toast("Stopped. It'll back up again next time you open the app.");render(true)}break;
     case "mailStop":if(S.mailJob){clearTimeout(S.mailJob.timer);const j=S.mailJob;j.done=true;j.state="failed";S.busy.mail=false;S.invMail="err:Stopped. Check your Gmail drafts before trying again.";const cur=S.invoices.find(i=>i.id===j.invId);if(cur&&cur.mailPending)save({...cur,mailPending:null},true);mailDraw();render(true)}break;
     case "attOpen":{const v2=S.attPrev&&S.attPrev.v[v];const r=S.receipts.find(x=>x.id===v);if(v2&&v2.url)lightbox(v2.url,r?`${r.vendor} · ${money(r.total,r.currency)}`:"");break}
     case "lbClose":{const el=$("#lbRoot");if(el)el.innerHTML="";backDraw();break}

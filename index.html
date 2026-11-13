@@ -156,7 +156,9 @@ img.logo{object-fit:contain;max-height:200px}
 .backbtn[hidden]{display:none}
 body.hasback{padding-bottom:70px}
 body.hasback .rbpop,body.hasback #sqRoot .saveq{bottom:calc(72px + env(safe-area-inset-bottom,0px))}
+#bkPill{position:fixed;z-index:45;top:calc(58px + env(safe-area-inset-top,0px));left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:10px;max-width:calc(100vw - 20px);padding:8px 10px 8px 14px;border-radius:999px;background:var(--panel2);color:var(--text);border:1px solid var(--gold);box-shadow:0 8px 24px rgba(0,0,0,.4);font-size:13.5px}
 #mailPill{position:fixed;z-index:46;top:calc(10px + env(safe-area-inset-top,0px));left:50%;transform:translateX(-50%);display:flex;align-items:center;gap:10px;max-width:calc(100vw - 20px);padding:8px 10px 8px 14px;border-radius:999px;background:var(--panel2);color:var(--text);border:1px solid var(--gold);box-shadow:0 8px 24px rgba(0,0,0,.4);font-size:13.5px}
+#bkPill,#mailPill{width:max-content}#bkPill>span:not(.spin),#mailPill>span:not(.spin){white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .attrow{display:flex;gap:10px;overflow-x:auto;padding:6px 2px 4px;-webkit-overflow-scrolling:touch}
 .att{flex:0 0 112px;display:flex;flex-direction:column;gap:6px;padding:0;border:none;background:none;color:var(--text);text-align:left;cursor:pointer}
 .att img,.att .attpdf{width:112px;height:146px;object-fit:cover;object-position:top;border-radius:6px;border:1px solid var(--line);background:#fff;display:flex;align-items:center;justify-content:center;font-weight:700;color:#555;font-size:13px}
