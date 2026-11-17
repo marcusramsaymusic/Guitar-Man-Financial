@@ -85,6 +85,7 @@ async function boot(){
   const endSession=()=>{if(CLOUD.provider&&(cloudTimer||CLOUD.dirty)){clearTimeout(cloudTimer);cloudTimer=null;cloudBackupNow(false)}bkPersist()};
   document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="hidden")endSession()});window.addEventListener("pagehide",endSession);
   if(CLOUD.provider&&CLOUD.dirty)setTimeout(()=>cloudBackupNow(false),1500);
+  setTimeout(rcSweep,5000);
 }
 /* ———————————— persistence ———————————— */
 function applyLocal(doc){
@@ -160,7 +161,7 @@ async function pdfToCanvas(file){
 async function prepFile(file){
   const isPdf=file.type==="application/pdf"||/\.pdf$/i.test(file.name||"");
   let canvas=null,orig=null;
-  if(isPdf){try{canvas=await pdfToCanvas(file)}catch{throw new Error("Couldn't open that PDF here. Take a screenshot of it and upload the screenshot instead.")}}
+  if(isPdf){orig=file;try{canvas=await pdfToCanvas(file)}catch{throw new Error("Couldn't open that PDF here. Take a screenshot of it and upload the screenshot instead.")}}
   else{
     let src=null;
     try{src=await createImageBitmap(file,{imageOrientation:"from-image"})}catch{}
@@ -251,7 +252,7 @@ async function fileDraft(){
   if(img&&S.col&&!(await saveImageDoc(rec.id,img)))toast("Receipt filed, but the photo copy couldn't be saved. Try Edit › Save again later.");
   toast(prev?"Receipt updated.":"Receipt filed.");
   if(!prev&&img&&photoAuto())photoToDropbox([{rec,blob:orig}]);
-  if(prev&&(prev.category!==rec.category||prev.date!==rec.date||prev.vendor!==rec.vendor)&&prev.photoSaved)setTimeout(()=>photoCheckDropbox(true),1500);
+  if(prev&&(prev.category!==rec.category||prev.date!==rec.date||prev.vendor!==rec.vendor)&&prev.photoSaved)setTimeout(()=>{photoCheckDropbox(true);rcRefile(rec.id)},1500);
   if(rec.billLater&&!rec.billReqAt)twSoon(90e3);
 }
 async function getImage(id){
@@ -684,7 +685,7 @@ async function downloadAll(inv){printHTML(sheetHTML(inv)+await receiptsPrintHTML
 async function receiptsPrintHTML(inv){const list=rcsOf(inv);let out="";for(const [k,{r,it}] of list.entries()){const img=r.hasImage?await getImage(r.id):null;out+=`<div class="pgbrk pr-rc" style="font-family:Arial,sans-serif;color:#111;background:#fff;padding:10px"><h2 style="margin:0 0 4px">Receipt ${k+1} of ${list.length}: ${esc(r.vendor)}</h2><p style="margin:0 0 10px;color:#555">${esc(fmtDate(r.date,"mmm d, yyyy"))} · ${money(r.total,r.currency)} ${esc(r.currency||"CAD")}${num(r.taxPaid)?` · GST/HST ${money(r.taxPaid,r.currency)}`:""} · billed on “${esc(it.desc)}”</p>${img?`<img src="${img}" alt="">`:`<p>${esc(r.note||r.category)}</p>`}</div>`}return out}
 /* ———————————— real files (PDF invoices, JPEG/PNG receipt photos) saved through the phone's share menu: pick Dropbox there ———————————— */
 function dataUrlBlob(u){const m=String(u||"").match(/^data:([^;,]+)(;base64)?,(.*)$/s);if(!m)return null;const bin=m[2]?atob(m[3]):decodeURIComponent(m[3]);return new Blob([binToBytes(bin)],{type:m[1]})}
-const imgExt=t=>t==="image/png"?"png":t==="image/webp"?"webp":"jpg";
+const imgExt=t=>t==="application/pdf"?"pdf":t==="image/png"?"png":t==="image/webp"?"webp":"jpg";
 const fileBase=s=>safeName(s).replace(/[.\s]+$/,"")||"file";
 function invFileName(inv){return `${inv.date} ${inv.status==="quote"?"Quote":"Invoice"} ${fileBase(inv.number)} ${fileBase(clientKey(inv.client))}.pdf`}
 const canvasBlob=(c,type,q)=>new Promise((res,rej)=>c.toBlob(b=>b?res(b):rej(new Error("image")),type,q));
@@ -710,6 +711,7 @@ const saveWord=()=>dropboxOn()?"Save to Dropbox":"Save files";
 const photoAuto=()=>!!S.downloads&&S.settings.photoAuto!==false;
 function photoName(r,blob){return `${r.date} ${fileBase(r.vendor)} receipt.${imgExt((blob&&blob.type)||"image/jpeg")}`}
 function photoToDropbox(list){if(!list.length)return;
+  if(dbxDirect()){list.forEach(({rec,blob})=>{if(blob)RC_UP.blobs[rec.id]=blob});rcUpload(true);return}
   S.photoSheet=false;photoSheet();startSave(list.length===1?"receipt photo":`${list.length} receipt photos`,list.map(({rec,blob})=>({label:`${rec.vendor} · ${money(rec.total,rec.currency)}`,rid:rec.id,make:async()=>{
     let b=blob;if(!b){const u=await getImage(rec.id);b=u?dataUrlBlob(u):null}if(!b)throw new Error("No photo for this one");
     const cur=S.receipts.find(x=>x.id===rec.id)||rec;return[{blob:b,name:photoName(cur,b)}]}})))}
@@ -718,6 +720,7 @@ const isEmailRc=r=>!r.hasImage&&!!(r.gid||r.source==="gmail");
 const dbxWanted=r=>r.category!==NOTMINE&&!r.photoSaved&&(r.hasImage||(isEmailRc(r)&&num(r.total)>0));
 const photoPending=()=>S.receipts.filter(r=>r.hasImage&&dbxWanted(r)).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
 const emailPending=()=>S.receipts.filter(r=>isEmailRc(r)&&dbxWanted(r)).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
+const GM_TAG=/\[gm-([0-9a-z]+)\]/i;
 const photoKey=s=>String(s||"").toLowerCase().replace(/\.(jpe?g|png|heic|webp|pdf)$/,"").replace(/\s*\(\d+\)$/,"").replace(/\s+/g," ").trim();
 let phChecked=0,phBusy=false,phShown=false;
 /* where each receipt lives: anything billed (or to be billed) to a client goes in Reimbursements › year › client, the rest in Receipts › year › category */
@@ -734,13 +737,18 @@ async function dbxListAll(path,recursive){const out=[];let p=pl(await withTimeou
 /* files your Dropbox: whatever you saved anywhere in Guitar Man Finance (or loose at the top of Dropbox) moves into its folder */
 async function photoCheckDropbox(force){if(!dropboxOn()||phBusy||(!force&&Date.now()-phChecked<2*60e3))return;phBusy=true;phChecked=Date.now();
   try{const files=[...await dbxListAll(ROOT,true),...await dbxListAll("",false).catch(()=>[])];
-    const byKey=new Map();files.forEach(f=>{if(/\.(jpe?g|png|heic|webp|pdf)$/i.test(f.name||""))byKey.set(photoKey(f.name),[...(byKey.get(photoKey(f.name))||[]),f])});
+    const byKey=new Map(),byGid=new Map();files.forEach(f=>{if(/\.(jpe?g|png|heic|webp|pdf)$/i.test(f.name||""))byKey.set(photoKey(f.name),[...(byKey.get(photoKey(f.name))||[]),f]);
+      const g=GM_TAG.exec(f.name||"");if(g){const k=g[1].toLowerCase();byGid.set(k,[...(byGid.get(k)||[]),f])}});
     const clean=n=>n.replace(/\s*\(\d+\)(\.\w+)$/,"$1");const moves=[],marks=[],rm=ridClients();
     const plan=(f,want)=>{if(fqOf(f).toLowerCase()!==want.toLowerCase())moves.push({source_path:f.file_id||f.path_display||f.path,destination_path:want})};
     for(const r of S.receipts){const base=photoKey(photoName(r)),keys=[base,r.photoSaved&&!r.photoSaved.bundle?photoKey(r.photoSaved.name):""].filter(Boolean);
-      const fs=[...new Set(keys)].flatMap(k=>byKey.get(k)||[]);if(!fs.length)continue;const dir=rcFolder(r,rm);
-      fs.forEach(f=>{const ext=(f.name.split(".").pop()||"").toLowerCase();plan(f,`${dir}/${photoKey(f.name)===base?clean(f.name):photoName(r).replace(/\.\w+$/,"")+"."+ext}`)});
-      if(!r.photoSaved)marks.push([r,{photoSaved:{at:Date.now(),name:fs[0].name,found:true}}])}
+      const fs=[...new Set(keys)].flatMap(k=>byKey.get(k)||[]).filter(f=>!GM_TAG.test(f.name||""));
+      /* from the Gmail script: every attachment of that email (and the email itself) stays together, named after the receipt */
+      const gf=r.gid?(byGid.get(String(r.gid).toLowerCase())||[]).slice().sort((a,b)=>String(a.file_id||a.id||a.name).localeCompare(String(b.file_id||b.id||b.name))):[];
+      if(!fs.length&&!gf.length)continue;const dir=rcFolder(r,rm),stem=photoName(r).replace(/\.\w+$/,"");
+      fs.forEach(f=>{const ext=(f.name.split(".").pop()||"").toLowerCase();plan(f,`${dir}/${photoKey(f.name)===base?clean(f.name):stem+"."+ext}`)});
+      gf.forEach((f,k)=>{const ext=(f.name.split(".").pop()||"pdf").toLowerCase();plan(f,`${dir}/${stem}${k?" "+(k+1):""} [gm-${r.gid}].${ext}`)});
+      if(!r.photoSaved)marks.push([r,{photoSaved:{at:Date.now(),name:(fs[0]||gf[0]).name,found:true}}])}
     const bundles=S.settings.dbxBundles||{};for(const [name,dir] of Object.entries(bundles))(byKey.get(photoKey(name))||[]).forEach(f=>plan(f,`${dir}/${clean(f.name)}`));
     for(const i of S.invoices)(byKey.get(photoKey(invFileName(i)))||[]).forEach(f=>plan(f,`${invFolder(i)}/${clean(f.name)}`));
     for(const [r,patch] of marks){const cur=S.receipts.find(x=>x.id===r.id);if(cur)await save({...cur,...patch},true)}
@@ -767,6 +775,7 @@ ${ps.length?`<div class="label" style="margin-top:4px">Photos · ${ps.length}</d
 ${es.length?`<div class="label" style="margin-top:6px">Emailed receipts · ${es.length}</div><p class="note" style="margin:4px 0 6px">${es.length<=6?"Each one goes as its own PDF.":`They go as one PDF per folder (${new Set(es.map(r=>rcFolder(r))).size} PDFs), so it's a few taps.`}</p>
 <div class="row" style="margin:4px 0 0"><button class="btn ${ps.length?"":"gold"}" data-act="esAll">Save emailed receipts</button></div>`:""}</div>`}
 function photoBanner(){if(!S.downloads)return "";const n=photoPending().length+emailPending().length;if(!n)return "";
+  if(dbxDirect())return `<div class="panel hot row" style="justify-content:space-between"><span>${RC_UP.busy?'<span class="spin"></span> ':""}<b>${n} receipt${n===1?"":"s"}</b> ${RC_UP.busy?"uploading to Dropbox…":"waiting to upload to Dropbox."}${RC_UP.err&&!RC_UP.busy?` <span class="dim">${esc(RC_UP.err)} It keeps trying by itself.</span>`:""}</span>${RC_UP.busy?"":`<button class="btn sm gold" data-act="rcUpNow">Upload now</button>`}</div>`;
   return `<div class="panel hot row" style="justify-content:space-between"><span><b>${n} receipt${n===1?"":"s"}</b> not in Dropbox yet.</span><button class="btn sm gold" data-act="psOpen">Back up</button></div>`}
 function startSave(title,entries){if(!S.downloads){toast("Saving files only works in the Claude app.");return}
   if(S.saveQ&&S.saveQ.busy)return;S.saveQ={title,items:entries.map(e=>({...e,status:"wait",files:null,fi:0,err:""})),i:0,busy:false,stopped:false};
@@ -1449,16 +1458,52 @@ async function dbxHandleRedirect(){
 async function hasBooksDB(){try{return (await IDB.all()).some(x=>x&&["invoice","receipt","trip","income"].includes(x.kind))}catch{return false}}
 async function dbxAfterConnect(was){
   const mine=await hasBooksDB();
+  RC_UP.swept=0;setTimeout(rcSweep,6000);
   if(was){toast("Dropbox re-linked.");if(mine)cloudBackupNow(true);else cloudRestore();return}
   let remote=null;try{remote=await dbxDownload()}catch{}
   if(remote&&!mine){toast("Restoring from Dropbox…");await cloudRestore();return}
   if(remote&&mine){CLOUD.conflict=true;await cloudPersist();redrawSoon();return}
-  toast("Dropbox linked.");cloudBackupNow(true)}
+  toast("Dropbox linked.");cloudBackupNow(true);RC_UP.swept=0;setTimeout(rcSweep,4000)}
 async function dbxToken(){const d=CLOUD.dbx||{};if(d.access&&Date.now()<d.exp-60000)return d.access;const r=await fetch("https://api.dropboxapi.com/oauth2/token",{method:"POST",body:new URLSearchParams({grant_type:"refresh_token",refresh_token:d.refresh||"",client_id:CFG.dropboxAppKey})});if(!r.ok){if(r.status===400||r.status===401){CLOUD.relink=true;await cloudPersist()}throw new Error("Dropbox needs to be re-linked. Your books are safe on this device.")}const j=await r.json();d.access=j.access_token;d.exp=Date.now()+(Number(j.expires_in)||14400)*1000;CLOUD.dbx=d;await cloudPersist();return d.access}
+const DBX_BASE=String(CFG.dropboxFolder||"").trim().replace(/\/+$/,"").replace(/^(?=[^/])/,"/");
 const DBX_PATH="/"+CLOUD_FILE;
 async function dbxUpload(str){const r=await fetch("https://content.dropboxapi.com/2/files/upload",{method:"POST",headers:{Authorization:"Bearer "+await dbxToken(),"Dropbox-API-Arg":JSON.stringify({path:DBX_PATH,mode:"overwrite",mute:true}),"Content-Type":"application/octet-stream"},body:new TextEncoder().encode(str)});if(r.status===401){CLOUD.relink=true;await cloudPersist();throw new Error("Dropbox needs to be re-linked. Your books are safe on this device.")}if(!r.ok)throw new Error("Dropbox didn't accept the backup ("+r.status+").")}
 async function dbxDownload(){const r=await fetch("https://content.dropboxapi.com/2/files/download",{method:"POST",headers:{Authorization:"Bearer "+await dbxToken(),"Dropbox-API-Arg":JSON.stringify({path:DBX_PATH})}});if(r.status===409)return null;if(!r.ok)throw new Error("Couldn't download from Dropbox ("+r.status+").");return r.text()}
 async function dbxDelete(){const r=await fetch("https://api.dropboxapi.com/2/files/delete_v2",{method:"POST",headers:{Authorization:"Bearer "+await dbxToken(),"Content-Type":"application/json"},body:JSON.stringify({path:DBX_PATH})});if(!r.ok&&r.status!==409)throw new Error("Couldn't delete the Dropbox copy.")}
+/* ———————————— receipt photos and PDFs straight into Dropbox ————————————
+   The copy of the app on your own web address, with Dropbox linked: each receipt uploads the moment you file it, into
+   Receipts › year › category (or Reimbursements › year › client), with no share menu. Inside Claude this can't happen,
+   because Claude's Dropbox connection only writes text files, so there it still goes through the share menu. */
+const dbxDirect=()=>CLOUD.provider==="dropbox"&&!CLOUD.relink&&!!CFG.dropboxAppKey&&!S.mcp;
+const dbxRcPath=(r,blob)=>`${DBX_BASE}${rcFolder(r).slice(ROOT.length)}/${photoName(r,blob)}`;
+const dbxArg=o=>JSON.stringify(o).replace(/[\u007f-￿]/g,c=>"\\u"+c.charCodeAt(0).toString(16).padStart(4,"0"));
+async function dbxApi(url,args,body){
+  const r=await fetch(url,{method:"POST",headers:{Authorization:"Bearer "+await dbxToken(),...(body?{"Dropbox-API-Arg":dbxArg(args),"Content-Type":"application/octet-stream"}:{"Content-Type":"application/json"})},body:body||JSON.stringify(args)});
+  if(r.status===401){CLOUD.relink=true;await cloudPersist();throw new Error("Dropbox needs to be re-linked.")}
+  if(r.status===409){const j=await r.json().catch(()=>({}));const e=new Error("Dropbox said no ("+(j.error_summary||"conflict")+").");e.summary=j.error_summary||"";throw e}
+  if(!r.ok)throw new Error(r.status===429?"Dropbox asked the app to slow down.":"Dropbox didn't answer ("+r.status+").");return r.json()}
+const RC_UP={busy:false,tries:0,timer:null,err:"",blobs:{},swept:0};
+async function rcUpload(force){
+  if(!dbxDirect()||RC_UP.busy||!force&&S.settings.photoAuto===false&&!Object.keys(RC_UP.blobs).length)return;
+  const list=photoPending();if(!list.length){RC_UP.tries=0;RC_UP.err="";return}
+  RC_UP.busy=true;clearTimeout(RC_UP.timer);RC_UP.err="";redrawSoon();let n=0;
+  for(const r0 of list){const r=S.receipts.find(x=>x.id===r0.id);if(!r||r.photoSaved)continue;
+    try{let b=RC_UP.blobs[r.id];if(!b){const u=await getImage(r.id);b=u?dataUrlBlob(u):null}if(!b)continue;
+      const path=dbxRcPath(r,b);const m=await dbxApi("https://content.dropboxapi.com/2/files/upload",{path,mode:"add",autorename:true,mute:true},b);
+      const cur=S.receipts.find(x=>x.id===r.id)||r;await save({...cur,photoSaved:{at:Date.now(),name:m.name||path.split("/").pop(),path:m.path_display||path,direct:true}},true);delete RC_UP.blobs[r.id];n++}
+    catch(e){RC_UP.err=(e&&e.message)||"Dropbox didn't answer.";break}}
+  RC_UP.busy=false;
+  if(n)toast(n===1?"Receipt saved to Dropbox.":`${n} receipts saved to Dropbox.`);
+  if(RC_UP.err&&!CLOUD.relink){const k=Math.min(RC_UP.tries++,CLOUD_WAIT.length-1);RC_UP.timer=setTimeout(()=>rcUpload(),CLOUD_WAIT[k]*1000)}else if(!RC_UP.err)RC_UP.tries=0;
+  redrawSoon()}
+/* keeps each file in the right folder: a new category or date, or a receipt you've since billed to a client */
+async function rcRefile(id){if(!dbxDirect())return;const r=S.receipts.find(x=>x.id===id),ps=r&&r.photoSaved;if(!ps||!ps.direct||!ps.path)return;
+  const ext=ps.path.split(".").pop()||"jpg",want=dbxRcPath(r).replace(/\.\w+$/,"."+ext);if(want.toLowerCase()===ps.path.toLowerCase())return;
+  try{const j=await dbxApi("https://api.dropboxapi.com/2/files/move_v2",{from_path:ps.path,to_path:want,autorename:true});const m=j.metadata||{};
+    const cur=S.receipts.find(x=>x.id===id)||r;await save({...cur,photoSaved:{...ps,path:m.path_display||want,name:m.name||want.split("/").pop()}},true)}catch{}}
+async function rcSweep(){if(!dbxDirect()||Date.now()-RC_UP.swept<2*60e3)return;RC_UP.swept=Date.now();
+  await rcUpload();let k=0;for(const r of S.receipts){if(k>=40||!dbxDirect())break;const ps=r.photoSaved;if(ps&&ps.direct&&ps.path&&ps.path.toLowerCase()!==dbxRcPath(r).replace(/\.\w+$/,"."+(ps.path.split(".").pop()||"jpg")).toLowerCase()){k++;await rcRefile(r.id)}}}
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")setTimeout(rcSweep,5000)});
 /* shared */
 /* when the cloud doesn't answer, keep trying: 15s, 30s, 1m, 2m, 5m, 10m, then every 30m */
 const CLOUD_WAIT=[15,30,60,120,300,600,1800];let cloudTries=0;
@@ -1500,13 +1545,14 @@ function cloudSection(){
   const when=CLOUD.lastSync?new Date(CLOUD.lastSync).toLocaleString():"not yet";
   if(gOk&&online&&(!CLOUD.provider||CLOUD.provider==="google"))setTimeout(()=>loadGis().catch(()=>{}),0);
   if(!CLOUD.provider)return `<div class="panel" style="background:var(--bg);margin-top:12px"><div class="label">Cloud backup (optional)</div>
-<p class="note" style="margin:6px 0 10px">Keep a copy of your books in your own Google Drive or Dropbox. The app only ever touches its own backup file, and it can't see anything else in your account. Leave this off and nothing leaves your device.</p>
+<p class="note" style="margin:6px 0 10px">Keep a copy of your books in your own Google Drive or Dropbox. The app only ever touches its own backup file (and, with Dropbox, the receipt photos and PDFs it saves for you), and it can't see anything else in your account. Leave this off and nothing leaves your device.</p>
 <div class="row"><button class="btn sm" data-act="cloudGoogle" ${gOk&&online?"":"disabled"}>Connect Google Drive</button><button class="btn sm" data-act="cloudDropbox" ${dOk&&online?"":"disabled"}>Connect Dropbox</button></div>
 ${!gOk||!dOk?`<p class="note" style="margin-top:6px">${!gOk&&!dOk?"Cloud backup":!gOk?"Google Drive":"Dropbox"} hasn't been set up on this copy of the app yet.</p>`:""}${CLOUD.lastErr?`<div class="err" style="margin-top:6px">${esc(CLOUD.lastErr)}</div>`:""}</div>`;
   const offArm=S.armed==="cloudOff",resArm=S.armed==="cloudRes";
   return `<div class="panel" style="background:var(--bg);margin-top:12px"><div class="label">Cloud backup · ${esc(cloudName())}</div>
 <p class="note" style="margin:6px 0">Backs up automatically after each change, when you leave the app, and at least once a week. It keeps one backup file and replaces it each time, so nothing piles up. Last backup: <b>${esc(when)}</b>${CLOUD.encrypt?` · <b>locked with your passphrase</b>${cloudKey?"":" (enter it below to keep backing up)"}`:""}.</p>
 ${CLOUD.lastErr?`<div class="err" style="margin:6px 0">${esc(CLOUD.lastErr)}</div>`:""}
+${CLOUD.provider==="dropbox"?`<p class="note" style="margin:6px 0">Receipt photos and PDFs also upload to Dropbox the moment you file them, into ${esc((DBX_BASE||"Apps › your app")+" › Receipts › year › category")} (reimbursements by client). They're normal files you can open, even when the backup is locked.${photoPending().length?` ${photoPending().length} waiting.`:""}</p>`:""}
 <div class="row"><button class="btn sm gold" data-act="cloudNow" ${cloudBusy?"disabled":""}>${cloudBusy?'<span class="spin"></span> Backing up…':"Back up now"}</button><button class="btn sm ${resArm?"armed":""}" data-act="cloudRes">${resArm?"Tap again to restore":`Restore from ${esc(cloudName())}`}</button><button class="btn sm ${offArm?"armed":"ghost"}" data-act="cloudOff">${offArm?"Tap again to disconnect":"Disconnect"}</button></div>
 <div style="margin-top:12px;border-top:1px solid var(--line);padding-top:10px">
 ${!CLOUD.encrypt?`<div class="label">Lock your cloud backups (recommended)</div><p class="note" style="margin:4px 0 8px">Encrypts the backup on this device before it's uploaded, so ${esc(cloudName())} only ever stores scrambled data. If you forget the passphrase, nobody can open the backup, not even the person who shared the app with you.</p>
@@ -2675,6 +2721,7 @@ document.addEventListener("click",async e=>{
     case "sqSkip":{const q=S.saveQ;if(q&&!q.busy&&q.i<q.items.length){q.items[q.i].status="err";q.items[q.i].err="Skipped";q.i++;q.note="";if(q.i<q.items.length)runSave();else sqDraw()}break}
     case "sqClose":S.saveQ=null;sqDraw();render();setTimeout(()=>{photoCheckDropbox(true);phEnsure()},400);break;
     case "psOpen":S.photoSheet=true;phEnsure();break;
+    case "rcUpNow":RC_UP.tries=0;rcUpload(true);break;
     case "psLater":S.photoSheet=false;photoSheet();break;
     case "psAll":photoToDropbox(photoPending().map(r=>({rec:r})));break;
     case "esAll":emailToDropbox(emailPending());break;

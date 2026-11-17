@@ -69,6 +69,52 @@ Then upload the folder to your host again.
 - **New phone:** install the app, connect the same Drive or Dropbox, and tap **Restore**.
 - Google only keeps the app signed in for about an hour at a time. After that, backups pause until the person taps **Back up now** and signs in again. Dropbox stays signed in.
 
+## 3b. Receipts to Dropbox automatically
+
+There are three ways a receipt can get to Dropbox. Use whichever fit.
+
+### Photos and PDFs you add in the app (your own web address, Dropbox linked)
+
+Once Dropbox is linked (step 3), every receipt photo or PDF uploads to Dropbox **the moment you tap File it**. There's no share menu and nothing to tap. Each one goes into **Receipts › year › category**, or **Reimbursements › year › client** for anything you bill back. Change the category or date later and the file moves too. With no signal, it waits and keeps trying, and the home page shows how many are waiting.
+
+- By default the files go in the app's own Dropbox folder (**Dropbox › Apps › your app name › Receipts**).
+- To keep them in **Dropbox › Guitar Man Finance**, next to what the app in Claude saves, create the Dropbox app with **Full Dropbox** access instead of **App folder** and set `dropboxFolder: "/Guitar Man Finance"` in `config.js`.
+- PDFs go up as the original PDF, photos as JPEG or PNG.
+
+Inside Claude the app can't upload a photo by itself: Claude's Dropbox connection can only write text files. So there it still opens the share menu after each photo. To skip that, use the copy on your own web address with Dropbox linked, or one of the phone shortcuts below.
+
+### Phone shortcuts (no app needed)
+
+These save straight into Dropbox from the camera. They don't add the receipt to your books, but they make sure the paper copy is never lost.
+
+- **iPhone:** in the **Shortcuts** app, make a new shortcut with **Scan Document** (or **Take Photo**), then **Save File** › Dropbox, folder `/Guitar Man Finance/Receipts/Inbox`, with **Ask Where to Save** off. Name it "Receipt" and add it to the Home Screen. You can also set it to run from **Back Tap** (Settings › Accessibility › Touch › Back Tap) or the Action button.
+- **Android or iPhone:** in the **Dropbox** app, tap **+** › **Scan document** and save into `Guitar Man Finance/Receipts/Inbox`. It saves a PDF or JPEG.
+
+### Gmail receipts to Dropbox (every 15 minutes, even with your phone off)
+
+`tools/gmail-receipts-to-dropbox.gs` is a small script that runs in your own Google account for free. It looks for receipt emails with the same search as **Sync Gmail** and saves:
+
+- every **PDF, JPEG or PNG attached** to the email (invoices, screenshots, scanned receipts), and
+- the **email itself as a PDF** when there's no attachment (most online receipts).
+
+Files go to `/Guitar Man Finance/Receipts/Inbox`, each named like `2026-11-03 Uber Receipts receipt [gm-18f2ab…].pdf`. Each email gets a **GMF/Saved to Dropbox** label in Gmail, so nothing is saved twice. When the app in Claude syncs that email, it recognises the file from the `[gm-…]` tag and moves it into **Receipts › year › category** (or **Reimbursements › year › client**), named after the receipt. Then it's no longer on the "not in Dropbox yet" list.
+
+Setup, once (about 10 minutes):
+
+1. **Dropbox app for the script.** At **dropbox.com/developers/apps** › **Create app** › **Scoped access** › **Full Dropbox**. (Pick **App folder** if you'd rather it only touched its own folder. Then set `DROPBOX_FOLDER` in the script to something like `/Receipts/Email`.) On **Permissions**, tick `files.content.write` and **Submit**. Copy the **App key**. No redirect address or secret is needed.
+2. Go to **script.google.com** › **New project**. Delete what's there, paste in the whole of `tools/gmail-receipts-to-dropbox.gs`, and save.
+3. Put the app key in `SETUP.DROPBOX_APP_KEY` and save. Pick **step1_getDropboxLink** in the function menu and tap **Run**. Google asks you to allow the script to read your Gmail and connect to an outside service. That's your own script talking to your own Dropbox; tap **Allow**. (If Google says the app isn't verified: **Advanced** › **Go to project**.)
+4. Open the link it prints under **Execution log**, sign in to Dropbox and tap **Allow**. Copy the code Dropbox shows.
+5. Paste the code into `SETUP.DROPBOX_CODE`, save, then run **step2_connectDropbox**. It says who it's connected as.
+6. Run **step3_startAutomatic**. It runs once straight away, then every 15 minutes.
+
+Good to know:
+
+- It starts from January 1 of this year. Set `START_DATE` to go back further. A big backlog takes a few runs (40 emails a run).
+- `EMAIL_AS_PDF: 'always'` also saves the email as a PDF when it has attachments.
+- To stop it, run **stopAutomatic**. To redo one email, remove its **GMF/Saved to Dropbox** label in Gmail.
+- Emails you've forwarded to yourself are included. Your own replies aren't.
+
 ## Will it remember people?
 
 Yes, as long as they open it from the home screen icon. Everything is stored on the phone, so there's nothing to log in to, and Dropbox stays linked. Phones can clear storage for websites that are only opened in the browser and not used for a while, which is another reason to add it to the home screen. Even if that happens, linking Dropbox again brings everything back.
