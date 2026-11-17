@@ -460,7 +460,7 @@ async function receiptsPrintHTML(inv){const list=rcsOf(inv);let out="";for(const
 async function downloadInvoicePdf(inv){printHTML(sheetHTML(inv))}
 /* ———————————— the invoice email: short and casual ———————————— */
 function signOff(){return String(S.settings.emailSig||"").trim()}
-function greetName(inv){const m=String(inv.clientEmail||"").match(/^\s*"?([A-Za-zÀ-ÿ'’-]{2,})[^<"]*"?\s*</);if(m&&!/^(info|accounts?|billing|admin|office|hello|contact|payments?|ap)$/i.test(m[1]))return m[1];
+function greetName(inv){if(emailsIn(inv.clientEmail).length>=2)return "guys";const m=String(inv.clientEmail||"").match(/^\s*"?([A-Za-zÀ-ÿ'’-]{2,})[^<"]*"?\s*</);if(m&&!/^(info|accounts?|billing|admin|office|hello|contact|payments?|ap)$/i.test(m[1]))return m[1];
   const c=String(inv.client||"").trim();if(!c||/music|records|productions?|\binc\b|ltd|llc|band|entertainment|management|group|festival|fest\b|events?|agency|media|society|association|studios?|&|\bthe\b/i.test(c)||c.split(/\s+/).length>2)return "guys";return c.split(/\s+/)[0]}
 function mailTopic(inv){const clean=s=>String(s||"").replace(/\(.*?\)/g,"").replace(/\s*(?:[x×@]|\bat\b)\s*\$?\d.*$/i,"").replace(/\$\s*\d.*$/,"").replace(/\b\d+\s*(?:days?|shows?|gigs?|nights?|hours?|hrs?)\b.*$/i,"").replace(/[-–—:,/]+\s*$/,"").replace(/\s+/g," ").trim();
   const pay=(inv.items||[]).find(it=>lineType(it)==="pay"&&String(it.desc||"").trim());return clean(inv.forLabel)||clean(pay&&pay.desc)||clean(inv.client)||"the work"}
@@ -471,29 +471,32 @@ function reimbWords(inv){const w=[];const add=x=>{if(!w.includes(x))w.push(x)};
   return w.length>1?w.filter(x=>x!=="expense"):w}
 const andList=a=>a.length<2?a.join(""):a.slice(0,-1).join(", ")+" and "+a[a.length-1];
 const theTopic=t=>/\b(show|gig|session|sessions|event|fest|festival|tour|run|date|weekend|rehearsals?)$/i.test(t)&&!/^(the|my|our|last)\b/i.test(t)?"the "+t:t;
-function baseSubject(inv){return `${mailTopic(inv)} ${isOverdue(inv)?"invoice":inv.status==="quote"?"quote":"invoice"}`.replace(/^\w/,c=>c.toUpperCase())}
+const hasReimb=inv=>(inv.items||[]).some(it=>lineType(it)==="reimb");
+const tripDest=inv=>String(inv.autoTrip&&inv.autoTrip.destination||"").replace(/\s+/g," ").trim();
+function baseSubject(inv){const d=tripDest(inv);if(d&&inv.status!=="quote")return `${d} trip invoice`.replace(/^\w/,c=>c.toUpperCase());return `${mailTopic(inv)} ${isOverdue(inv)?"invoice":inv.status==="quote"?"quote":"invoice"}`.replace(/^\w/,c=>c.toUpperCase())}
 function baseBody(inv){const hi=`Hey ${greetName(inv)}!`,t=mailTopic(inv),so=signOff();
   if(isOverdue(inv)&&inv.status==="sent")return reminderBody(inv);
   if(inv.status==="quote")return `${hi}\n\nHere's my quote for ${t}. Let me know if it works!${so?"\n\n"+so:""}`;
-  const rw=reimbWords(inv);const what=rw.length?`my bill and ${andList(rw)} reimbursement${rw.length>1||rw[0]==="expense"?"s":""}`:"the bill";
-  return `${hi}\n\nSending over ${what} for ${theTopic(t)}. Thanks for having me!${so?"\n\n"+so:""}`}
+  const d=tripDest(inv),what=hasReimb(inv)?"my bill and reimbursements":d?"my bill":"the bill";
+  return `${hi}\n\nSending over ${what} for ${d?"the last trip to "+d:theTopic(t)}. Thanks for having me!${so?"\n\n"+so:""}`}
 function reminderBody(inv){const t=invTotals(inv),so=signOff();return `Hey ${greetName(inv)}!\n\nJust following up on the ${mailTopic(inv).replace(/^the\s+/i,"")} invoice (#${inv.number}, ${money(t.total,inv.currency)}) from ${shortDate(inv.date)}. Attached it again. Let me know when I can expect it, thanks!${so?"\n\n"+so:""}`}
 
 function mailSubject(inv){const l=learnedFor(inv);const s=l&&fromStyle(l.subject,inv);return s?s.replace(/^\w/,c=>c.toUpperCase()):baseSubject(inv)}
 function defaultMailBody(inv){const l=learnedFor(inv);return (l&&fromStyle(l.body,inv))||baseBody(inv)}
 
 /* ———————————— learns how you write: your edits here, and what you actually sent from Gmail ———————————— */
-const styleKind=inv=>isOverdue(inv)&&inv.status==="sent"?"reminder":inv.status==="quote"?"quote":reimbWords(inv).length?"invoiceR":"invoice";
-function styleVars(inv){const t=invTotals(inv);return{name:greetName(inv),client:String(inv.client||"").trim(),topic:mailTopic(inv).replace(/^the\s+/i,""),number:String(inv.number||""),total:money(t.total,inv.currency),reimb:andList(reimbWords(inv)),date:shortDate(inv.date)}}
+const styleKind=inv=>isOverdue(inv)&&inv.status==="sent"?"reminder":inv.status==="quote"?"quote":tripDest(inv)?(hasReimb(inv)?"tripR":"trip"):hasReimb(inv)?"invoiceR":"invoice";
+function styleVars(inv){const t=invTotals(inv);return{name:greetName(inv),client:String(inv.client||"").trim(),topic:mailTopic(inv).replace(/^the\s+/i,""),number:String(inv.number||""),total:money(t.total,inv.currency),reimb:andList(reimbWords(inv)),dest:tripDest(inv),date:shortDate(inv.date)}}
 const reEsc=s=>s.replace(/[.*+?^${}()|[\]\\]/g,"\\$&");
 function toStyle(text,inv){let s=String(text||"").replace(/\r/g,"").trim();if(!s)return "";const v=styleVars(inv);
   s=s.replace(/^((?:hey|hi|hello|dear|morning|good morning|yo)[ ,]+)([A-Za-zÀ-ÿ'’-]{2,})(?=[\s,!.])/i,(m,a,n)=>/^(there|all|team|everyone|folks)$/i.test(n)?m:a+"{name}");
-  const pairs=[["topic",v.topic],["client",v.client],["total",v.total],["total",v.total.replace(/\.00$/,"")],["reimb",v.reimb],["date",v.date],["name",v.name]].filter(([k,x])=>x&&x.length>=(k==="name"?2:3)&&!/^\{/.test(x));
+  const pairs=[["topic",v.topic],["client",v.client],["total",v.total],["total",v.total.replace(/\.00$/,"")],["reimb",v.reimb],["dest",v.dest],["date",v.date],["name",v.name]].filter(([k,x])=>x&&x.length>=(k==="name"?2:3)&&!/^\{/.test(x));
   pairs.sort((a,b)=>b[1].length-a[1].length).forEach(([k,x])=>{s=s.replace(new RegExp(`(^|[^A-Za-z0-9])${reEsc(x)}(?![A-Za-z0-9])`,"gi"),(m,p)=>p+`{${k}}`)});
   if(v.number)s=s.replace(new RegExp(`(#\\s?|\\b(?:invoice|inv|bill|no\\.?)\\s*#?\\s?)${reEsc(v.number)}(?![\\d.,])`,"gi"),(m,p)=>p+"{number}");
   return s}
-function fromStyle(tpl,inv){if(!tpl)return "";const v=styleVars(inv);if(/\{reimb\}/.test(tpl)&&!v.reimb)return "";
-  return tpl.replace(/\{(name|client|topic|number|total|reimb|date)\}/g,(m,k)=>v[k]||"")}
+/* a learned wording that lists the expense kinds ("parking and cab") isn't used any more: the default "my bill and reimbursements" takes over */
+function fromStyle(tpl,inv){if(!tpl)return "";const v=styleVars(inv);if(/\{reimb\}/.test(tpl))return "";if(/\{dest\}/.test(tpl)&&!v.dest)return "";
+  return tpl.replace(/\{(name|client|topic|number|total|dest|date)\}/g,(m,k)=>v[k]||"")}
 const learnedFor=inv=>(S.settings.mailStyle||{})[styleKind(inv)]||null;
 async function learnStyle(inv,subject,body,from,at){
   const k=styleKind(inv),st={...(S.settings.mailStyle||{})},prev=st[k]||{};at=at||Date.now();if(prev.at&&prev.at>at)return false;
@@ -542,9 +545,9 @@ async function learnFromSent(){if(learnBusy||!S.mcp||!gmailOn()||Date.now()-lear
     if(learned){if(S.invViewId&&S.mailFor===S.invViewId){const inv=S.invoices.find(i=>i.id===S.invViewId);if(inv&&!S.mailEdited){S.mailBody=defaultMailBody(inv);S.mailSubj=mailSubject(inv)}}render()}}
   finally{learnBusy=false}}
 document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")setTimeout(learnFromSent,3000)});
-const STYLE_WORDS={name:"their name",client:"client",topic:"what it's for",number:"number",total:"total",reimb:"expenses",date:"date"};
-const styleShow=s=>esc(s).replace(/\{(name|client|topic|number|total|reimb|date)\}/g,(m,k)=>`<span class="chip" style="padding:0 6px;font-size:12.5px;text-transform:none;letter-spacing:0;font-family:inherit">${STYLE_WORDS[k]}</span>`);
-function styleSection(){const st=S.settings.mailStyle||{};const rows=[["invoice","Invoice"],["invoiceR","Invoice with reimbursements"],["quote","Quote"],["reminder","Reminder"]].filter(([k])=>st[k]&&(st[k].body||st[k].subject));
+const STYLE_WORDS={name:"their name",client:"client",topic:"what it's for",number:"number",total:"total",reimb:"expenses",dest:"trip city",date:"date"};
+const styleShow=s=>esc(s).replace(/\{(name|client|topic|number|total|reimb|dest|date)\}/g,(m,k)=>`<span class="chip" style="padding:0 6px;font-size:12.5px;text-transform:none;letter-spacing:0;font-family:inherit">${STYLE_WORDS[k]}</span>`);
+function styleSection(){const st=S.settings.mailStyle||{};const rows=[["invoice","Invoice"],["invoiceR","Invoice with reimbursements"],["trip","Trip invoice"],["tripR","Trip invoice with reimbursements"],["quote","Quote"],["reminder","Reminder"]].filter(([k])=>st[k]&&(st[k].body||st[k].subject));
   return `<section class="panel" style="max-width:640px"><div class="label">How your emails sound</div>
 <p class="note" style="margin:6px 0 10px">The app copies how you word your invoice emails and subject lines. ${OFFLINE?"It learns from the changes you make to the subject and message.":"It learns from changes you make before you hit Create draft, and from the email you actually send from Gmail."}</p>
 ${rows.length?rows.map(([k,n])=>`<div class="rowline" style="align-items:flex-start"><span style="min-width:0"><b>${n}</b> <span class="dim">· from ${st[k].from==="gmail"?"your sent email":"your edits"}, ${esc(shortDate(new Date(st[k].at).toISOString().slice(0,10)))}</span><br><span class="note">Subject: ${st[k].subject?styleShow(st[k].subject):"(default)"}</span><br><span class="note" style="white-space:pre-wrap">${st[k].body?styleShow(st[k].body):"(default)"}</span></span><button class="btn sm ghost" data-act="styleForget" data-v="${k}">Forget</button></div>`).join(""):`<p class="note" style="margin:0">Nothing learned yet. It uses the default wording until you change one or send one.</p>`}</section>`}
