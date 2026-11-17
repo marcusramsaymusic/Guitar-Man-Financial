@@ -159,21 +159,23 @@ async function pdfToCanvas(file){
 }
 async function prepFile(file){
   const isPdf=file.type==="application/pdf"||/\.pdf$/i.test(file.name||"");
-  let canvas=null;
+  let canvas=null,orig=null;
   if(isPdf){try{canvas=await pdfToCanvas(file)}catch{throw new Error("Couldn't open that PDF here. Take a screenshot of it and upload the screenshot instead.")}}
   else{
     let src=null;
     try{src=await createImageBitmap(file,{imageOrientation:"from-image"})}catch{}
     if(!src){try{src=await loadImg(URL.createObjectURL(file))}catch{}}
     if(!src){
-      if(["image/jpeg","image/png","image/webp","image/gif"].includes(file.type))return{blob:file,preview:null};
+      if(["image/jpeg","image/png","image/webp","image/gif"].includes(file.type))return{blob:file,preview:null,orig:file};
       throw new Error("This photo format can't be opened here (often an iPhone HEIC photo picked from Files). Use Take photo instead, or take a screenshot of the picture and upload that.");
     }
     canvas=drawScaled(src,1600);
+    if(/^image\/(jpeg|png)$/.test(file.type))orig=file;
+    else{try{orig=await new Promise(r=>drawScaled(src,4096).toBlob(r,"image/jpeg",.92))}catch{orig=null}}
   }
   const blob=await new Promise(r=>canvas.toBlob(r,"image/jpeg",.86));
   if(!blob)throw new Error("Couldn't process that image. Try again with a fresh photo.");
-  return{blob,preview:shrink(canvas,IMG_LIMIT)};
+  return{blob,preview:shrink(canvas,IMG_LIMIT),orig:orig||blob};
 }
 
 /* ———————————— Claude prompts ———————————— */
@@ -214,7 +216,7 @@ async function onReceiptFile(file){
   if(!file)return;
   S.tab="receipts";S.imgView=null;if(S.ctl)S.ctl.abort();
   const d=blankDraft({status:"preparing"});S.recDraft=d;render(true);
-  try{const p=await prepFile(file);if(S.recDraft!==d)return;d.blob=p.blob;d.preview=p.preview;if(p.preview)d.imgHash=strHash(p.preview)}
+  try{const p=await prepFile(file);if(S.recDraft!==d)return;d.blob=p.blob;d.preview=p.preview;d.orig=p.orig||null;if(p.preview)d.imgHash=strHash(p.preview)}
   catch(e){if(S.recDraft!==d)return;d.status="error";d.err=e.message;render(true);return}
   if(S.sample&&S.canImages)readDraft();
   else{d.status="manual";d.err="This offline version never sends anything off your device, so type the details in. The photo is kept with the receipt.";render(true)}
@@ -243,12 +245,12 @@ async function fileDraft(){
   rec.billLater=d.billLater&&!isPersonal(rec)&&!rec.billedTo?((d.billTo||"").trim()||"No client yet"):"";
   if(rec.billLater!==(prev&&prev.billLater||""))rec.billReqAt=null;
   if(rec.currency==="CAD"&&String(d.taxPaid??"").trim()===""&&!isPersonal(rec)){const e=taxSplit(rec.total,d.prov,rec.category);if(e){rec.taxPaid=e.claim;rec.pstPaid=e.other;rec.taxEstimated=true}}
-  const img=d.preview;if(S.ctl)S.ctl.abort();
+  const img=d.preview,orig=d.orig;if(S.ctl)S.ctl.abort();
   S.recDraft=null;if(img)S.imgCache[rec.id]=img;
   await save(rec);
   if(img&&S.col&&!(await saveImageDoc(rec.id,img)))toast("Receipt filed, but the photo copy couldn't be saved. Try Edit › Save again later.");
   toast(prev?"Receipt updated.":"Receipt filed.");
-  if(!prev&&dropboxOn())backupReceipt(rec.id);
+  if(!prev&&img&&photoAuto())photoToDropbox([{rec,blob:orig}]);
   if(rec.billLater&&!rec.billReqAt)twSoon(90e3);
 }
 async function getImage(id){
@@ -392,12 +394,10 @@ async function booksBackup(why){
   if(S.bkJob){S.bkJob.state="running";bkDraw()}
   try{
     const stamp=new Date().toISOString().slice(0,19).replace(/[:T]/g,"-");
-    await ensureFolders([ROOT,ROOT+"/Backups",ROOT+"/Backups/Photos"]);
+    await ensureFolders([ROOT,ROOT+"/Backups"]);
     if(force||sig!==S.settings.bkSig||stale){
-      await dbxCreate(`${ROOT}/Backups/books-${stamp}.json`,JSON.stringify(booksData(),null,1));
-      await dbxCreate(`${ROOT}/Backups/summary-${S.year}-${stamp}.html`,summaryHTML(S.year))}
-    for(const r of photos.slice(0,40)){const u=await getImage(r.id);if(!u){done.add(r.id);continue}
-      if(u.length<4.8e6)await dbxCreate(`${ROOT}/Backups/Photos/${r.date||"undated"} ${safeName(r.vendor)} ${r.id}.json`,JSON.stringify({app:"Guitar Man Finance",kind:"photo",images:{[r.id]:u}}));done.add(r.id)}
+      await dbxCreate(`${ROOT}/Backups/books-${stamp}.json`,JSON.stringify(booksData(),null,1))}
+    photos.forEach(r=>done.add(r.id));
     const ids=new Set(S.receipts.map(r=>r.id));
     await save({...S.settings,kind:"settings",id:"settings",bkAt:Date.now(),bkSig:sig,bkErr:"",bkPhotos:[...done].filter(x=>ids.has(x))},true);
     const retried=S.bkJob&&S.bkJob.tries>0;if(S.bkJob){clearTimeout(S.bkJob.timer);S.bkJob=null;bkDraw()}
@@ -419,8 +419,7 @@ async function bkPrune(){
   const books=files.filter(f=>/^books-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}(-\d{2})?\.json$/.test(f.name)).sort((a,b)=>b.name.localeCompare(a.name));
   const months=new Set();books.forEach((f,k)=>{const mo=f.name.slice(6,13);if(k<BK_KEEP){months.add(mo);return}if(!months.has(mo)&&months.size<12){months.add(mo);return}kill.push(f)});
   const years=new Set();files.filter(f=>/^summary-\d{4}-\d{4}-\d{2}-\d{2}-\d{2}-\d{2}(-\d{2})?\.html$/.test(f.name)).sort((a,b)=>b.name.slice(13).localeCompare(a.name.slice(13))).forEach(f=>{const y=f.name.slice(8,12);if(years.has(y))kill.push(f);else years.add(y)});
-  if(S.receipts.length){const ids=new Set(S.receipts.map(r=>r.id));const ph=await dbxList(ROOT+"/Backups/Photos");
-    ph.forEach(f=>{const m=f.name.match(/ ([A-Za-z0-9_-]{6,})\.json$/);if(m&&!ids.has(m[1]))kill.push(f)})}
+
   if(kill.length)await S.mcp.callTool("Dropbox","delete",{entries:kill.slice(0,200).map(f=>({source_path:f.path_display||f.path}))});
   if(kill.length)save({...S.settings,kind:"settings",id:"settings",bkPruned:{at:Date.now(),n:kill.length}},true);
   return kill.length}
@@ -703,6 +702,13 @@ function receiptEntry(r){const base=`${r.date} ${fileBase(r.vendor)} receipt`;
     return[await receiptSummaryPdf(r,`${base}.pdf`)]}}}
 function invoiceEntries(inv){return[{label:`${inv.status==="quote"?"Quote":"Invoice"} #${inv.number} (PDF)`,make:async()=>[{blob:(await buildInvoicePdf(inv)).output("blob"),name:invFileName(inv)}]},...rcsOf(inv).map(({r})=>receiptPdfEntry(r))]}
 const saveWord=()=>dropboxOn()?"Save to Dropbox":"Save files";
+/* receipt photos go to Dropbox as real JPEG/PNG files through the share menu (Claude's Dropbox connection can only write text files) */
+const photoAuto=()=>!!S.downloads&&S.settings.photoAuto!==false;
+function photoName(r,blob){return `${r.date} ${fileBase(r.vendor)} receipt.${imgExt((blob&&blob.type)||"image/jpeg")}`}
+function photoToDropbox(list){if(!list.length)return;
+  startSave(list.length===1?"receipt photo":`${list.length} receipt photos`,list.map(({rec,blob})=>({label:`${rec.vendor} · ${money(rec.total,rec.currency)}`,make:async()=>{
+    let b=blob;if(!b){const u=await getImage(rec.id);b=u?dataUrlBlob(u):null}if(!b)throw new Error("No photo for this one");
+    const cur=S.receipts.find(x=>x.id===rec.id)||rec;return[{blob:b,name:photoName(cur,b)}]}})))}
 function startSave(title,entries){if(!S.downloads){toast("Saving files only works in the Claude app.");return}
   if(S.saveQ&&S.saveQ.busy)return;S.saveQ={title,items:entries.map(e=>({...e,status:"wait",files:null,fi:0,err:""})),i:0,busy:false,stopped:false};
   let el=$("#sqRoot");if(!el){el=document.createElement("div");el.id="sqRoot";document.body.appendChild(el)}runSave()}
@@ -2117,13 +2123,14 @@ async function onReceiptBatch(files){
       else{rec.vendor=`Receipt ${i+1} of ${files.length}`;rec.note=""}
       const dup=findDupReceipt(rec);if(dup&&num(rec.total)>0){B.dups.push(`${dup.vendor} · ${money(dup.total,dup.currency)} · ${fmtDate(dup.date,"mmm d, yyyy")}`);B.done=i+1;batchDraw();continue}
       const bt=(B.billSet||"").trim();if(bt&&!isPersonal(rec))rec.billLater=bt;
-      S.imgCache[rec.id]=p.preview;await save(rec,true);
+      S.imgCache[rec.id]=p.preview;await save(rec,true);(B.orig=B.orig||{})[rec.id]=p.orig||p.blob;
       if(S.col&&!(await saveImageDoc(rec.id,p.preview)))B.fail.push(`${rec.vendor}: the photo copy didn't save, the details did`);
       B.ids.push(rec.id)}
     catch(e){B.fail.push(`${files[i].name||"Photo "+(i+1)}: ${(e&&e.message)||"couldn't open it"}`)}
     B.done=i+1;batchDraw()}
   B.running=false;const last=(B.billTo||"").trim(),typing=document.activeElement&&document.activeElement.id==="batch-billto";if(last&&!typing)await batchApplyBill(B,last,true);
   batchDraw();render();
+  if(B.ids.length&&photoAuto())photoToDropbox(B.ids.map(id=>({rec:S.receipts.find(r=>r.id===id),blob:B.orig&&B.orig[id]})).filter(x=>x.rec));
   toast(`${B.ids.length} receipt${B.ids.length===1?"":"s"} added${B.dups.length?`, ${B.dups.length} already there`:""}.`)}
 async function batchApplyBill(B,bt,quiet){B.billSet=bt;let n=0;for(const id of B.ids){const r=S.receipts.find(x=>x.id===id);if(r&&!r.billedTo&&!isPersonal(r)&&r.billLater!==bt){await save({...r,billLater:bt,billReqAt:null},true);n++}}if(n)twSoon(90e3);if(!quiet&&n)toast(`${B.ids.length} receipt${B.ids.length===1?"":"s"} set to bill later to ${bt}.`);return n}
 function batchPanel(){const B=S.batch;if(!B)return "";const pct=Math.round(B.done/B.total*100);
@@ -2325,7 +2332,7 @@ function vSettings(){
 <div class="row" style="margin-top:10px"><button class="btn gold" data-act="saveSettings">Save</button></div></section>
 ${vCustomize()}
 <section class="panel" style="max-width:640px"><div class="label">Bring in earlier books</div>
-<p class="note" style="margin:6px 0 10px">${OFFLINE?"Load a backup file (.json) you saved from this app before, on this device or another one.":"Pick the newest books file in Dropbox › Guitar Man Finance › Backups. To bring back receipt photos too, select the files in Backups › Photos as well (you can pick them all at once)."}</p>
+<p class="note" style="margin:6px 0 10px">${OFFLINE?"Load a backup file (.json) you saved from this app before, on this device or another one.":"Pick the newest books file in Dropbox › Guitar Man Finance › Backups."}</p>
 <label tabindex="0" role="button" class="btn" for="jsonIn">${ICON.up}Load backup file</label>${msgLine(S.msg.import)}</section>
 
 ${styleSection()}
