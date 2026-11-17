@@ -251,6 +251,7 @@ async function fileDraft(){
   if(img&&S.col&&!(await saveImageDoc(rec.id,img)))toast("Receipt filed, but the photo copy couldn't be saved. Try Edit › Save again later.");
   toast(prev?"Receipt updated.":"Receipt filed.");
   if(!prev&&img&&photoAuto())photoToDropbox([{rec,blob:orig}]);
+  if(prev&&(prev.category!==rec.category||prev.date!==rec.date||prev.vendor!==rec.vendor)&&prev.photoSaved)setTimeout(()=>photoCheckDropbox(true),1500);
   if(rec.billLater&&!rec.billReqAt)twSoon(90e3);
 }
 async function getImage(id){
@@ -716,17 +717,39 @@ function photoToDropbox(list){if(!list.length)return;
 const photoPending=()=>S.receipts.filter(r=>r.hasImage&&!r.photoSaved&&r.category!==NOTMINE).sort((a,b)=>(b.date||"").localeCompare(a.date||""));
 const photoKey=s=>String(s||"").toLowerCase().replace(/\.(jpe?g|png|heic|webp)$/,"").replace(/\s*\(\d+\)$/,"").replace(/\s+/g," ").trim();
 let phChecked=0,phBusy=false,phShown=false;
-/* looks through Dropbox › Guitar Man Finance for photos you already saved, so they drop off the list */
-async function photoCheckDropbox(force){if(!dropboxOn()||phBusy||(!force&&Date.now()-phChecked<10*60e3))return;phBusy=true;phChecked=Date.now();
-  try{const names=new Set();let p=pl(await withTimeout(S.mcp.callTool("Dropbox","list_folder",{path:ROOT,recursive:true,object_types:["file"],max_results:600},{cache:false}),60000));
-    for(let n=0;n<15;n++){(p.entries||[]).forEach(f=>{if(/\.(jpe?g|png|heic|webp)$/i.test(f.name||""))names.add(photoKey(f.name))});if(!p.has_more||!p.cursor)break;
-      p=pl(await withTimeout(S.mcp.callTool("Dropbox","list_folder",{cursor:p.cursor},{cache:false}),60000))}
-    let n=0;for(const r of photoPending()){const k=photoKey(photoName(r));if(names.has(k)){await save({...r,photoSaved:{at:Date.now(),name:photoName(r),found:true}},true);n++}}
-    if(n)render()}catch{}finally{phBusy=false}}
+/* ———————————— files your Dropbox: photos and PDFs you save anywhere in Guitar Man Finance (or the top of your Dropbox)
+   get moved into Receipts › year › category and Invoices › year › client ———————————— */
+const INBOX=ROOT+"/Receipts/Inbox";
+const rcFolder=r=>`${ROOT}/Receipts/${yearOf(r.date)||"Undated"}/${safeName(r.category||"Other")}`;
+const invFolder=i=>`${ROOT}/Invoices/${yearOf(i.date)||"Undated"}/${safeName(clientKey(i.client)||"No client")}`;
+/* recursive listings leave path_display empty: rebuild it from the namespace path, for comparing only */
+const fqOf=f=>f.path_display||("/"+String(f.path||"").replace(/^ns:\d+\/\//,""));
+async function dbxListAll(path,recursive){const out=[];let p=pl(await withTimeout(S.mcp.callTool("Dropbox","list_folder",{path,recursive,object_types:["file"],max_results:600},{cache:false}),60000));
+  for(let n=0;n<15;n++){out.push(...(p.entries||[]));if(!p.has_more||!p.cursor)break;p=pl(await withTimeout(S.mcp.callTool("Dropbox","list_folder",{cursor:p.cursor},{cache:false}),60000))}return out}
+async function photoCheckDropbox(force){if(!dropboxOn()||phBusy||(!force&&Date.now()-phChecked<2*60e3))return;phBusy=true;phChecked=Date.now();
+  try{const files=[...await dbxListAll(ROOT,true),...await dbxListAll("",false).catch(()=>[])];
+    const byKey=new Map();files.forEach(f=>{if(/\.(jpe?g|png|heic|webp|pdf)$/i.test(f.name||""))byKey.set(photoKey(f.name)+"|"+(f.name.split(".").pop()||"").toLowerCase().replace("jpeg","jpg"),f)});
+    const find=(keys,exts)=>{for(const k of keys)for(const e of exts){const f=byKey.get(k+"|"+e);if(f)return f}return null};
+    const moves=[],marks=[];
+    for(const r of S.receipts){
+      // the photo
+      if(r.hasImage){const names=[photoName(r),r.photoSaved&&r.photoSaved.name].filter(Boolean).map(photoKey);const f=(r.photoDbx&&files.find(x=>x.file_id===r.photoDbx.id))||find(names,["jpg","png","heic","webp"]);
+        if(f){const ext=(f.name.split(".").pop()||"jpg").toLowerCase();const want=`${rcFolder(r)}/${photoKey(photoName(r))===photoKey(f.name)?f.name.replace(/\s*\(\d+\)(\.\w+)$/,"$1"):photoName(r).replace(/\.\w+$/,"."+ext)}`;
+          if(!r.photoSaved||!r.photoDbx||r.photoDbx.id!==f.file_id)marks.push([r,{photoSaved:r.photoSaved||{at:Date.now(),name:f.name,found:true},photoDbx:{id:f.file_id}}]);
+          if(fqOf(f).toLowerCase()!==want.toLowerCase())moves.push({source_path:f.file_id||f.path_display||f.path,destination_path:want})}}
+      // receipt PDFs saved from an invoice
+      const pf=find([photoKey(`${rcFileName(r)}.pdf`)],["pdf"]);if(pf){const want=`${rcFolder(r)}/${pf.name.replace(/\s*\(\d+\)(\.\w+)$/,"$1")}`;if(fqOf(pf).toLowerCase()!==want.toLowerCase())moves.push({source_path:pf.file_id||pf.path_display||pf.path,destination_path:want})}}
+    for(const i of S.invoices){const f=find([photoKey(invFileName(i))],["pdf"]);if(f){const want=`${invFolder(i)}/${f.name.replace(/\s*\(\d+\)(\.\w+)$/,"$1")}`;if(fqOf(f).toLowerCase()!==want.toLowerCase())moves.push({source_path:f.file_id||f.path_display||f.path,destination_path:want})}}
+    for(const [r,patch] of marks){const cur=S.receipts.find(x=>x.id===r.id);if(cur)await save({...cur,...patch},true)}
+    const seen=new Set(),mv=moves.filter(m=>!seen.has(m.source_path)&&seen.add(m.source_path)).slice(0,200);
+    if(mv.length){await withTimeout(S.mcp.callTool("Dropbox","move",{entries:mv,autorename:true},{cache:false}),90000);S.orgLast={at:Date.now(),n:mv.length}}
+    if(marks.length||mv.length)render()}
+  catch{}finally{phBusy=false}}
+document.addEventListener("visibilitychange",()=>{if(document.visibilityState==="visible")setTimeout(()=>photoCheckDropbox(false),4000)});
 function photoSheet(){const el=$("#psRoot");if(!el)return;const ps=photoPending();
   if(!S.photoSheet||!ps.length||(S.saveQ&&S.saveQ.items.length)){el.innerHTML="";return}
   el.innerHTML=`<div class="saveq" role="dialog" aria-label="Receipt photos not in Dropbox"><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><b>${ps.length} receipt photo${ps.length===1?"":"s"} not in Dropbox yet</b><button class="btn sm ghost" data-act="psLater">Later</button></div>
-<p class="note" style="margin:6px 0 8px">For your tax records. Tap Save all, then pick Dropbox (Guitar Man Finance › Receipts) in the share menu for each photo.</p>
+<p class="note" style="margin:6px 0 8px">For your tax records. Tap Save all, then pick Dropbox in the share menu and save to Guitar Man Finance › Receipts › Inbox. The app files each one into its year and category folder.</p>
 <ul class="sqlist">${ps.slice(0,60).map(r=>`<li><span class="sqi">○</span><span>${esc(shortDate(r.date))} · ${esc(r.vendor)} · ${money(r.total,r.currency)}</span><button class="btn sm ghost" data-act="psOne" data-v="${r.id}" style="margin-left:auto">Save</button></li>`).join("")}${ps.length>60?`<li class="note">+${ps.length-60} more</li>`:""}</ul>
 <div class="row" style="margin-top:8px"><button class="btn gold" data-act="psAll">Save all ${ps.length}</button></div></div>`}
 function photoBanner(){if(!S.downloads)return "";const n=photoPending().length;if(!n)return "";
@@ -747,12 +770,12 @@ async function runSave(){const q=S.saveQ;if(!q||q.busy)return;q.busy=true;q.stop
       it.retried=false;it.status="wait";q.stopped=true;
       q.note=c==="declined"?`“${f.name}” wasn't saved. Tap Save next to try it again, or skip it.`:c==="rate_limited"?"Your phone needed a moment. Tap Save next to carry on.":c==="too_large"?`“${f.name}” is too big to save here.`:c==="unavailable"||c==="not_granted"?"Saving files isn't available in this view.":`Couldn't save “${f.name}”.`;
       if(c==="too_large"){it.status="err";it.err="Too big to save";q.i++}break}}
-  q.busy=false;sqDraw()}
+  q.busy=false;sqDraw();if(q.i>=q.items.length&&dropboxOn())setTimeout(()=>photoCheckDropbox(true),8000)}
 function sqDraw(){const el=$("#sqRoot"),q=S.saveQ;if(!el)return;if(!q){el.innerHTML="";return}
   const done=q.i>=q.items.length,nSaved=q.items.filter(x=>x.status==="saved").length;
   const ic={wait:"○",making:'<span class="spin"></span>',saving:'<span class="spin"></span>',saved:"✓",err:"!"};
   el.innerHTML=`<div class="saveq" role="dialog" aria-label="${esc(saveWord())}"><div class="row" style="justify-content:space-between;flex-wrap:nowrap"><b>${esc(saveWord())} · ${esc(q.title)}</b>${q.busy?"":`<button class="btn sm ghost" data-act="sqClose">${done?"Done":"Close"}</button>`}</div>
-<p class="note" style="margin:6px 0 8px">${done?`${nSaved} of ${q.items.length} saved.`:dropboxOn()?"Pick Dropbox in the share menu for each file.":"Pick where each file goes."}</p>
+<p class="note" style="margin:6px 0 8px">${done?`${nSaved} of ${q.items.length} saved.${dropboxOn()?" Filing them into their Dropbox folders now.":""}`:dropboxOn()?"Pick Dropbox in the share menu and save to Guitar Man Finance › Receipts › Inbox. The app moves each file into the right folder.":"Pick where each file goes."}</p>
 <ul class="sqlist">${q.items.map((x,k)=>`<li class="sq-${x.status}"><span class="sqi">${ic[x.status]||"○"}</span><span>${esc(x.label)}${x.files&&x.files.length>1?` <span class="dim">(${x.files.length} files)</span>`:""}${x.err?` <span class="err">${esc(x.err)}</span>`:""}</span></li>`).join("")}</ul>
 ${q.note?`<p class="note" style="margin:8px 0 0">${esc(q.note)}</p>`:""}
 ${!q.busy&&!done?`<div class="row" style="margin-top:10px"><button class="btn sm gold" data-act="sqNext">Save next</button><button class="btn sm ghost" data-act="sqSkip">Skip this one</button></div>`:""}</div>`}
@@ -2451,7 +2474,7 @@ document.addEventListener("change",e=>{
   if(/^ie-d\d+$/.test(el.id)&&S.invEdit&&/reimburs/i.test(el.value)){const i=Number(el.id.slice(4)),it=S.invEdit.items[i];if(it&&!it.rid){if(lineType(it)!=="reimb"){it.type="reimb";it.taxable=false;const s=$("#ie-y"+i);if(s)s.value="reimb";const cb=$("#ie-t"+i);if(cb)cb.checked=false;refreshTotals()}autoFindReceipt(i)}return}
   if(/^ie-r\d+$/.test(el.id)&&S.invEdit){const it=S.invEdit.items[Number(el.id.slice(4))];const r=evalAmt(el.value);if(it&&r!=null){it.rate=String(r);el.value=it.rate;refreshTotals();const h=document.getElementById("ie-h"+el.id.slice(4));if(h)h.innerHTML=lineHint(it)}return}
   if(el.dataset.ty!==undefined&&S.invEdit){const it=S.invEdit.items[Number(el.dataset.ty)];it.type=el.value;it.typeTouched=true;it.taxable=el.value==="pay"&&S.invEdit.currency==="CAD";render(true);return}
-  if(el.dataset.revcat){const r=S.receipts.find(x=>x.id===el.dataset.revcat);if(r)save({...r,category:el.value,needsReview:false},true).then(()=>{toast(`${r.vendor} → ${el.value}`);render(true)});return}
+  if(el.dataset.revcat){const r=S.receipts.find(x=>x.id===el.dataset.revcat);if(r)save({...r,category:el.value,needsReview:false},true).then(()=>{toast(`${r.vendor} → ${el.value}`);if(r.photoSaved)setTimeout(()=>photoCheckDropbox(true),1500);render(true)});return}
   if(el.dataset.attachrc){S.attachRc=el.checked;return}
   if(el.dataset.erasecloud){S.erase=S.erase||{step:2};S.erase.cloud=el.checked;return}
   if(el.dataset.rcmode){S.rcMode=el.value;return}
