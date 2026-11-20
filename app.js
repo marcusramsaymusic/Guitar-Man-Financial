@@ -2288,14 +2288,19 @@ function vReview(inv){
     return `<div class="panel" style="${ok?"":"border-color:var(--red);opacity:.8"}">
 <div class="row" style="justify-content:space-between;flex-wrap:nowrap;align-items:flex-start"><b style="min-width:0;overflow-wrap:anywhere">${esc(it.desc||"(no description)")}</b><span class="mono" style="font-weight:600;white-space:nowrap${ok?"":";text-decoration:line-through"}">${money(amt,cur)}</span></div>
 ${r?`<div class="row" style="margin-top:8px;align-items:flex-start;gap:12px">${r.hasImage?(img?`<img class="thumb" src="${img}" alt="${esc(r.vendor)} receipt" style="max-width:120px;max-height:160px">`:`<span class="note"><span class="spin"></span> Loading photo…</span>`):""}<div style="flex:1;min-width:180px"><div>${esc(r.vendor)} <span class="dim">· ${esc(fmtDate(r.date,"mmm d, yyyy"))} · ${money(r.total,r.currency)}${(r.currency||"CAD")!==cur?" "+esc(r.currency):""}</span></div>${r.note?`<div class="note">${esc(r.note)}</div>`:""}${r.url?`<a class="lnk" href="${esc(r.url)}" target="_blank" rel="noopener">Open email</a>`:""}</div></div>`:`<div class="note" style="margin-top:6px">No receipt attached to this line.</div>`}
-<div class="row" style="margin-top:10px" role="group" aria-label="Approve or reject"><button class="btn sm ${ok?"green":"ghost"}" data-act="rvSet" data-v="${k}" data-ok="1" aria-pressed="${ok}">${ok?"✓ Approved":"Approve"}</button><button class="btn sm ${ok?"ghost":"armed"}" data-act="rvSet" data-v="${k}" data-ok="0" aria-pressed="${!ok}">${ok?"":"✕ "}Not billable</button></div></div>`}).join("");
+<div class="row" style="margin-top:10px" role="group" aria-label="Approve or reject"><button class="btn sm ${dec[k]===true?"green":"ghost"}" data-act="rvSet" data-v="${k}" data-ok="1" aria-pressed="${dec[k]===true}">${dec[k]===true?"✓ Approved":"Approve"}</button><button class="btn sm ${dec[k]===false?"armed":"ghost"}" data-act="rvSet" data-v="${k}" data-ok="0" aria-pressed="${dec[k]===false}">${dec[k]===false?"✕ ":""}Not billable</button></div></div>`}).join("");
   return `<div class="row"><button class="btn ghost" data-act="rvCancel">← Back</button></div>
 <section class="panel hot"><span class="plaque" style="cursor:default">Review reimbursements</span>
 <p class="note" style="margin:10px 0 0">#${esc(inv.number)} · ${esc(inv.client||"no client")} · ${esc(fmtDate(inv.date,"mmm d, yyyy"))}. Approve what ${esc(inv.client||"the client")} should pay you back for. Anything marked Not billable comes off the invoice and goes back into your own write-offs.</p></section>
 ${idx.length?`<div class="list">${cards}</div>`:`<div class="panel"><p class="note" style="margin:0">This invoice has no reimbursement lines, so there's nothing to check.</p></div>`}
-<div class="panel" style="position:sticky;bottom:calc(8px + env(safe-area-inset-bottom,0px));z-index:5;padding:12px 14px"><div class="splitline"><span>Reimbursements <b>${money(t.reimb,cur)}</b>${nNo?` <span class="dim">(was ${money(all.reimb,cur)})</span>`:""}</span><span>${nOk} approved · ${nNo} not billable</span><span>Invoice total incl. ${esc(taxNm(inv))} <b>${money(t.total,cur)}</b></span></div>
+<div class="panel" style="position:sticky;bottom:calc(8px + env(safe-area-inset-bottom,0px));z-index:5;padding:12px 14px"><div class="splitline"><span>Reimbursements <b>${money(t.reimb,cur)}</b>${nNo?` <span class="dim">(was ${money(all.reimb,cur)})</span>`:""}</span><span>${idx.filter(k=>dec[k]===true).length} approved · ${nNo} not billable${idx.some(k=>dec[k]===undefined)?` · <b>${idx.filter(k=>dec[k]===undefined).length} to check</b>`:""}</span><span>Invoice total incl. ${esc(taxNm(inv))} <b>${money(t.total,cur)}</b></span></div>
 <div class="row" style="margin-top:10px"><button class="btn gold" data-act="rvSave">${idx.length?"Save &amp; approve":"Approve"}</button><button class="btn ghost" data-act="rvCancel">Cancel</button></div></div>`;
 }
+/* each line starts unchecked; a tap marks it (tap again to unmark) and says what's left */
+function rvTap(k,want){const rv=S.review;if(!rv)return;const inv=S.invoices.find(i=>i.id===rv.id);if(!inv)return;
+  if(rv.dec[k]===want)delete rv.dec[k];else rv.dec[k]=want;
+  const idx=reimbIdx(inv),left=idx.filter(i=>rv.dec[i]===undefined).length;render(true);
+  toast(rv.dec[k]===undefined?"Unmarked. Tap Approve or Not billable.":left?`${idx.length-left} of ${idx.length} checked. ${left} to go.`:"All checked. Tap Save & approve at the bottom to finish.")}
 async function rvSave(){
   const rv=S.review;if(!rv)return;const inv=S.invoices.find(i=>i.id===rv.id);if(!inv){S.review=null;render(true);return}
   const idx=reimbIdx(inv),rej=idx.filter(k=>rv.dec[k]===false);
@@ -2624,7 +2629,7 @@ document.addEventListener("click",async e=>{
     case "lbClose":{const el=$("#lbRoot");if(el)el.innerHTML="";backDraw();break}
     case "goBack":goBack();break;
     case "openReview":openReview(v);break;
-    case "rvSet":if(S.review){S.review.dec[Number(v)]=b.dataset.ok==="1";render(true)}break;
+    case "rvSet":rvTap(Number(v),b.dataset.ok==="1");break;
     case "rvSave":await rvSave();break;
     case "rvCancel":{const id=S.review&&S.review.id;S.review=null;S.invViewId=id||S.invViewId;render(true);window.scrollTo({top:0});break}
     case "clearCheck":{const inv=S.invoices.find(i=>i.id===v);if(inv){await save({...inv,checkNotes:""});toast("Check notes cleared.")}break}

@@ -96,7 +96,7 @@ table.q td{padding:8px 0;border-top:1px solid var(--line);text-align:right;font-
 .empty{text-align:left;display:flex;flex-direction:column;gap:12px;padding:26px 20px}
 .empty h2{font-family:var(--f-display);font-weight:900;font-size:30px;letter-spacing:.5px;text-transform:uppercase;margin:0;text-wrap:balance}
 .sr{position:fixed;top:0;left:0;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;opacity:0;pointer-events:none}
-#toast{position:fixed;left:50%;transform:translateX(-50%);bottom:calc(18px + env(safe-area-inset-bottom,0px));background:var(--panel2);border:1px solid var(--gold);color:var(--text);padding:10px 16px;border-radius:6px;font-size:14px;max-width:min(92vw,520px);box-shadow:0 6px 20px rgba(0,0,0,.5);z-index:60}
+#toast{pointer-events:none;position:fixed;left:50%;transform:translateX(-50%);bottom:calc(18px + env(safe-area-inset-bottom,0px));background:var(--panel2);border:1px solid var(--gold);color:var(--text);padding:10px 16px;border-radius:6px;font-size:14px;max-width:min(92vw,520px);box-shadow:0 6px 20px rgba(0,0,0,.5);z-index:60}
 .spin{display:inline-block;width:14px;height:14px;border:2px solid var(--dim);border-top-color:var(--gold);border-radius:50%;animation:sp .8s linear infinite;vertical-align:-2px}
 @keyframes sp{to{transform:rotate(360deg)}}
 @media (prefers-reduced-motion:reduce){.spin{animation:none}}
