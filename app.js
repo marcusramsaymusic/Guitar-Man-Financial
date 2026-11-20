@@ -2265,7 +2265,7 @@ function goBack(){const t=backTarget();if(!t)return;
   else if(t==="drill")S.drill=null;
   else if(t==="tab"){S.tab=S.navHist.pop();S.invViewId=null;S.invEdit=null;S.recDraft=null;y=(S.tabScroll||{})[S.tab]||0}
   S.retScroll=null;render(true);window.scrollTo({top:y})}
-function backDraw(){let b=$("#backBtn");const t=backTarget();if(!t){if(b)b.hidden=true;document.body.classList.remove("hasback");return}
+function backDraw(){let b=$("#backBtn");const t=backTarget();if(!t||t==="review"){if(b)b.hidden=true;document.body.classList.remove("hasback");return}
   if(!b){b=document.createElement("button");b.id="backBtn";b.className="backbtn";b.dataset.act="goBack";b.setAttribute("aria-label","Back");b.innerHTML='<svg width="12" height="20" viewBox="0 0 12 20" aria-hidden="true"><path d="M10 2 2 10l8 8" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span>Back</span>';document.body.appendChild(b)}
   b.hidden=false;document.body.classList.add("hasback")}
 
@@ -2288,13 +2288,13 @@ function vReview(inv){
     return `<div class="panel" style="${ok?"":"border-color:var(--red);opacity:.8"}">
 <div class="row" style="justify-content:space-between;flex-wrap:nowrap;align-items:flex-start"><b style="min-width:0;overflow-wrap:anywhere">${esc(it.desc||"(no description)")}</b><span class="mono" style="font-weight:600;white-space:nowrap${ok?"":";text-decoration:line-through"}">${money(amt,cur)}</span></div>
 ${r?`<div class="row" style="margin-top:8px;align-items:flex-start;gap:12px">${r.hasImage?(img?`<img class="thumb" src="${img}" alt="${esc(r.vendor)} receipt" style="max-width:120px;max-height:160px">`:`<span class="note"><span class="spin"></span> Loading photo…</span>`):""}<div style="flex:1;min-width:180px"><div>${esc(r.vendor)} <span class="dim">· ${esc(fmtDate(r.date,"mmm d, yyyy"))} · ${money(r.total,r.currency)}${(r.currency||"CAD")!==cur?" "+esc(r.currency):""}</span></div>${r.note?`<div class="note">${esc(r.note)}</div>`:""}${r.url?`<a class="lnk" href="${esc(r.url)}" target="_blank" rel="noopener">Open email</a>`:""}</div></div>`:`<div class="note" style="margin-top:6px">No receipt attached to this line.</div>`}
-<div class="row" style="margin-top:10px" role="group" aria-label="Approve or reject"><button class="btn sm ${ok?"green":"ghost"}" data-act="rvSet" data-v="${k}" data-ok="1" aria-pressed="${ok}">${ok?"✓ ":""}Approve</button><button class="btn sm ${ok?"ghost":"armed"}" data-act="rvSet" data-v="${k}" data-ok="0" aria-pressed="${!ok}">${ok?"":"✕ "}Not billable</button></div></div>`}).join("");
+<div class="row" style="margin-top:10px" role="group" aria-label="Approve or reject"><button class="btn sm ${ok?"green":"ghost"}" data-act="rvSet" data-v="${k}" data-ok="1" aria-pressed="${ok}">${ok?"✓ Approved":"Approve"}</button><button class="btn sm ${ok?"ghost":"armed"}" data-act="rvSet" data-v="${k}" data-ok="0" aria-pressed="${!ok}">${ok?"":"✕ "}Not billable</button></div></div>`}).join("");
   return `<div class="row"><button class="btn ghost" data-act="rvCancel">← Back</button></div>
 <section class="panel hot"><span class="plaque" style="cursor:default">Review reimbursements</span>
 <p class="note" style="margin:10px 0 0">#${esc(inv.number)} · ${esc(inv.client||"no client")} · ${esc(fmtDate(inv.date,"mmm d, yyyy"))}. Approve what ${esc(inv.client||"the client")} should pay you back for. Anything marked Not billable comes off the invoice and goes back into your own write-offs.</p></section>
 ${idx.length?`<div class="list">${cards}</div>`:`<div class="panel"><p class="note" style="margin:0">This invoice has no reimbursement lines, so there's nothing to check.</p></div>`}
-<div class="panel splitline" style="position:sticky;bottom:calc(8px + env(safe-area-inset-bottom,0px));z-index:5"><span>Reimbursements <b>${money(t.reimb,cur)}</b>${nNo?` <span class="dim">(was ${money(all.reimb,cur)})</span>`:""}</span><span>${nOk} approved · ${nNo} not billable</span><span>Invoice total incl. ${esc(taxNm(inv))} <b>${money(t.total,cur)}</b></span></div>
-<div class="row"><button class="btn gold" data-act="rvSave">${idx.length?"Save &amp; approve":"Approve"}</button><button class="btn ghost" data-act="rvCancel">Cancel</button></div>`;
+<div class="panel" style="position:sticky;bottom:calc(8px + env(safe-area-inset-bottom,0px));z-index:5;padding:12px 14px"><div class="splitline"><span>Reimbursements <b>${money(t.reimb,cur)}</b>${nNo?` <span class="dim">(was ${money(all.reimb,cur)})</span>`:""}</span><span>${nOk} approved · ${nNo} not billable</span><span>Invoice total incl. ${esc(taxNm(inv))} <b>${money(t.total,cur)}</b></span></div>
+<div class="row" style="margin-top:10px"><button class="btn gold" data-act="rvSave">${idx.length?"Save &amp; approve":"Approve"}</button><button class="btn ghost" data-act="rvCancel">Cancel</button></div></div>`;
 }
 async function rvSave(){
   const rv=S.review;if(!rv)return;const inv=S.invoices.find(i=>i.id===rv.id);if(!inv){S.review=null;render(true);return}
